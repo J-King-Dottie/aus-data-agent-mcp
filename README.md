@@ -33,6 +33,18 @@ Produced by [Dottie AI Studio](https://dottieaistudio.com.au/).
 - Stores large results as artifacts, then supports inspection and narrowing before analysis.
 - Runs directly as MCP or through the included web app.
 
+## How It Works
+
+Nisaba uses one built catalog snapshot for discovery. `search_catalog` runs local SQLite FTS over that catalog, returns a candidate pool, and the agent chooses the best dataset before source-specific retrieval begins.
+
+The flow is:
+
+```text
+catalog FTS -> AI dataset selection -> metadata when needed -> source adapter -> artifact -> inspect/narrow -> analysis
+```
+
+The checked-in catalog makes first-run discovery fast and reliable after clone. It is intentionally included, not a raw data mirror.
+
 ## Requirements
 
 - Python
