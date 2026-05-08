@@ -1,0 +1,24 @@
+{
+  "repo": "J-King-Dottie/ausdata-ai-harness",
+  "collected_at": "2026-05-08T01:05:53Z",
+  "metrics": {
+    "clones": {
+      "days": 14,
+      "known_total_count": 38,
+      "known_sum_daily_uniques": 27,
+      "latest_github_rolling_count": 38,
+      "latest_github_rolling_uniques": 25,
+      "first_timestamp": "2026-04-23T00:00:00Z",
+      "last_timestamp": "2026-05-06T00:00:00Z"
+    },
+    "views": {
+      "days": 14,
+      "known_total_count": 0,
+      "known_sum_daily_uniques": 0,
+      "latest_github_rolling_count": 0,
+      "latest_github_rolling_uniques": 0,
+      "first_timestamp": "2026-04-23T00:00:00Z",
+      "last_timestamp": "2026-05-06T00:00:00Z"
+    }
+  }
+}
