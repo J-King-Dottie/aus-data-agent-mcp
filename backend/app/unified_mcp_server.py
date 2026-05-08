@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
 from mcp.server.fastmcp import FastMCP
+from mcp.types import ToolAnnotations
 from openai import OpenAI
 
 from .config import get_settings
@@ -1061,24 +1062,24 @@ def _retrieve_macro_from_record(
 
 server = FastMCP(
     name="nisaba-mcp",
+    website_url="https://github.com/J-King-Dottie/ausdata-ai-harness",
     instructions=(
-        "Access Nisaba data through one unified MCP. Preferred workflow: use search_catalog to shortlist datasets "
-        "across Australian domestic and global macro sources, inspect a few plausible candidates if the best choice is not obvious, "
-        "and keep dependent steps serial when the next step depends on the previous result. Each core retrieval tool supports one targeted request or a small batch of 2 or 3 independent requests; "
-        "use single targeted calls by default and use batch mode only when the jobs are genuinely independent and can benefit from parallel execution. "
-        "use get_metadata only when the selected source needs it, use retrieve to fetch the selected dataset through the correct source-specific adapter, then inspect_artifact "
-        "before deciding whether narrow_artifact is needed. Do not invent dataset ids, ABS anchors, provider ids, or "
-        "Comtrade codes. For ABS, never send raw dataKey to retrieve; use get_metadata, then call retrieve with anchorType + anchorCode only and let the server build the wildcard. If one ABS anchor path returns NoRecordsFound, treat that as an anchor-path failure on the same table and try another plausible anchor strategy before abandoning the dataset. Respect source-specific retrieval semantics. For search_catalog, write retrieval-oriented queries "
-        "that include requested dimensions and likely dataset-family words rather than paraphrasing the user. For Australian "
-        "domestic questions, prefer ABS-first search queries and treat the top 40 results as a candidate pool, not a truth-ranked list. "
-        "When choosing among candidates, prefer the most specific dataset that can answer the requested slice over a broader parent table. "
-        "When calling narrow_artifact, prefer explicit dimensionFilters in canonical list form like [{'dimension':'AGE','values':['15 - 24 years']}], not an ad hoc map. "
-        "If candidate evaluation is still ambiguous after inspect and one light narrow pass, ask the user one short clarification instead of continuing to guess or loop."
+        "Nisaba is a unified MCP for Australian public data and global macro context. "
+        "Workflow: search_catalog -> get_metadata only when required -> retrieve -> inspect_artifact -> narrow_artifact only when needed. "
+        "Prefer Australian domestic sources for Australian questions; use global macro sources for context or comparison. "
+        "Do not invent dataset ids, ABS anchors, provider ids, Comtrade codes, or raw ABS dataKeys. "
+        "For ABS, call get_metadata first, then retrieve with anchorType and anchorCode so the server can build the wildcard key. "
+        "Treat search results as a candidate pool, not a guaranteed ranking; choose the most specific dataset that answers the requested slice. "
+        "Use batch arguments only for 2 or 3 independent jobs. Keep dependent steps serial. "
+        "If the right candidate remains ambiguous after light inspection, ask one short clarification instead of looping."
     ),
 )
 
 
-@server.tool()
+@server.tool(
+    title="Search catalog",
+    annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False),
+)
 def search_catalog(query: str = "", queries: Optional[List[str]] = None, forceRefresh: bool = False) -> Dict[str, Any]:
     """Search the unified catalog and return the top 40 candidate datasets for one query or a small batch of queries.
 
@@ -1143,7 +1144,10 @@ def search_catalog(query: str = "", queries: Optional[List[str]] = None, forceRe
         raise
 
 
-@server.tool()
+@server.tool(
+    title="Get dataset metadata",
+    annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True),
+)
 def get_metadata(
     datasetId: str = "",
     query: str = "",
@@ -1237,7 +1241,10 @@ def get_metadata(
         raise
 
 
-@server.tool()
+@server.tool(
+    title="Retrieve dataset",
+    annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=True),
+)
 def retrieve(
     datasetId: str = "",
     query: str = "",
@@ -1432,7 +1439,10 @@ def retrieve(
         raise
 
 
-@server.tool()
+@server.tool(
+    title="Inspect artifact",
+    annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False),
+)
 def inspect_artifact(artifactId: str = "", artifactIds: Optional[List[str]] = None) -> Dict[str, Any]:
     """Inspect one stored artifact or a small batch of artifacts and decide whether each is ready for analysis.
 
@@ -1589,7 +1599,10 @@ def inspect_artifact(artifactId: str = "", artifactIds: Optional[List[str]] = No
         raise
 
 
-@server.tool()
+@server.tool(
+    title="Narrow artifact",
+    annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False),
+)
 def narrow_artifact(
     artifactId: str = "",
     dimensionFilters: Optional[List[Dict[str, Any]]] = None,

@@ -1,7 +1,7 @@
 {
   "mcpServers": {
     "nisaba": {
-      "command": "./.venv/Scripts/python.exe",
+      "command": "python",
       "args": [
         "-m",
         "backend.app.unified_mcp_server"
