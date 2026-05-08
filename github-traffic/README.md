@@ -10,3 +10,5 @@ merges the current rolling window into CSV files once per day.
 - `summary.json`: known totals from the saved CSV rows
 
 The `uniques` values are daily unique counts. Summing them is useful as a daily activity signal, but it is not the same as all-time unique people because the same person can appear on multiple days.
+
+The workflow needs a `TRAFFIC_TOKEN` repository secret with access to the repository traffic API.

@@ -16,7 +16,7 @@ jobs:
 
       - name: Collect traffic
         env:
-          GITHUB_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.TRAFFIC_TOKEN }}
         run: python scripts/collect_github_traffic.py --repo "$GITHUB_REPOSITORY"
 
       - name: Commit updated traffic history
