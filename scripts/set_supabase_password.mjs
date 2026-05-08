@@ -1,5 +1,8 @@
 #!/usr/bin/env node
 
+// Local admin helper. Keep secrets in environment variables or the prompt,
+// not command-line arguments that can appear in process listings.
+
 import fs from "node:fs";
 import path from "node:path";
 import readline from "node:readline/promises";
@@ -38,7 +41,26 @@ const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(scriptDir, "..");
 loadDotEnv(path.join(repoRoot, ".env"));
 
-const [, , emailArg, passwordArg, displayNameArg] = process.argv;
+function parseArgs(argv) {
+  const positionals = [];
+  let displayName = "";
+  for (let index = 0; index < argv.length; index += 1) {
+    const value = argv[index];
+    if (value === "--display-name") {
+      displayName = argv[index + 1] || "";
+      index += 1;
+      continue;
+    }
+    positionals.push(value);
+  }
+  return {
+    email: positionals[0] || "",
+    unsafeExtraArg: positionals[1] || "",
+    displayName,
+  };
+}
+
+const { email: emailArg, unsafeExtraArg, displayName: displayNameArg } = parseArgs(process.argv.slice(2));
 
 const supabaseUrl = (process.env.VITE_SUPABASE_URL || "").trim();
 const serviceRoleKey = (process.env.SUPABASE_SERVICE_ROLE_KEY || "").trim();
@@ -137,8 +159,13 @@ async function updateUser(userId, password, displayName) {
 
 async function main() {
   let email = emailArg;
-  let password = passwordArg;
+  let password = (process.env.NISABA_USER_PASSWORD || "").trim();
   let displayName = displayNameArg;
+
+  if (unsafeExtraArg) {
+    console.error("Do not pass passwords as command-line arguments. Use NISABA_USER_PASSWORD or the interactive prompt.");
+    process.exit(2);
+  }
 
   if (!email || !password) {
     const rl = readline.createInterface({ input, output });

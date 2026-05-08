@@ -9,23 +9,26 @@ ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 WORKDIR /app
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends python3 python3-pip python3-venv curl \
+    && apt-get install -y --no-install-recommends python3 python3-pip python3-venv \
     && rm -rf /var/lib/apt/lists/*
 
 RUN python3 -m venv "$VIRTUAL_ENV"
 
 COPY backend ./backend
+COPY frontend ./frontend
 COPY ABS_DataAPI.openapi.yaml ABS_DataAPI.openapi.yaml
 COPY MANUAL_SOURCE_DEFINITIONS.json MANUAL_SOURCE_DEFINITIONS.json
 COPY COMTRADE_METADATA.json COMTRADE_METADATA.json
-COPY NISABA_SYSTEM_PROMPT.txt NISABA_SYSTEM_PROMPT.txt
+COPY MCP_ANALYST.md MCP_ANALYST.md
+COPY WEB_APP.md WEB_APP.md
 COPY UNIFIED_CATALOG_FULL.json UNIFIED_CATALOG_FULL.json
-COPY UNIFIED_CATALOG_FTS.sqlite3 UNIFIED_CATALOG_FTS.sqlite3
 COPY scripts ./scripts
-COPY run.py run.py
 
 RUN mkdir -p /app/runtime /app/cache \
-    && pip install --no-cache-dir -r backend/requirements.txt
+    && pip install --no-cache-dir -r backend/requirements.txt \
+    && npm --prefix frontend ci \
+    && npm --prefix frontend run build \
+    && rm -rf frontend/node_modules /root/.npm
 
 EXPOSE 8080
 
