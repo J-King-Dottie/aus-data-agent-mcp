@@ -47,6 +47,37 @@ function Resolve-CommandPath {
     throw "Could not find executable. Tried: $($Candidates -join ', ')"
 }
 
+function Convert-ToCmdLiteral {
+    param(
+        [string]$Value
+    )
+
+    if ($null -eq $Value) {
+        return ""
+    }
+
+    return $Value.Replace('"', '""')
+}
+
+function Invoke-NpmCommand {
+    param(
+        [string]$NpmExe,
+        [string]$WorkingDirectory,
+        [string[]]$Arguments
+    )
+
+    $escapedWorkingDirectory = Convert-ToCmdLiteral -Value $WorkingDirectory
+    $escapedNpmExe = Convert-ToCmdLiteral -Value $NpmExe
+    $escapedArguments = @($Arguments | ForEach-Object { Convert-ToCmdLiteral -Value $_ })
+    $argText = ($escapedArguments | ForEach-Object { "`"$_`"" }) -join " "
+    $command = "pushd `"$escapedWorkingDirectory`" && `"$escapedNpmExe`" $argText && popd"
+
+    & cmd.exe /d /c $command
+    if ($LASTEXITCODE -ne 0) {
+        throw "npm command failed: $($Arguments -join ' ')"
+    }
+}
+
 function Resolve-CanonicalPath {
     param(
         [string]$Path
@@ -407,8 +438,7 @@ if ($SkipInstall -and $needsFrontendNodeInstall) {
 if (-not $SkipInstall -or $needsFrontendNodeInstall) {
     Write-Host "Installing frontend and backend dependencies..."
     if (-not $SkipInstall -or $needsFrontendNodeInstall) {
-        & $NpmExe install --prefix $FrontendRoot
-        if ($LASTEXITCODE -ne 0) { throw "npm install failed in frontend." }
+        Invoke-NpmCommand -NpmExe $NpmExe -WorkingDirectory $FrontendRoot -Arguments @("install")
     }
 
     if (-not $SkipInstall) {
@@ -427,13 +457,13 @@ if ($Reload) {
 
 $url = "http://127.0.0.1:3000"
 Write-Host "Starting frontend dev server with HMR on $url in a separate terminal"
-$escapedRepoRoot = $RepoRoot.Replace('"', '""')
-$escapedFrontendRoot = $FrontendRoot.Replace('"', '""')
-$frontendCommand = "cd /d `"$escapedFrontendRoot`" && `"$NpmExe`" run dev"
+$escapedFrontendRoot = Convert-ToCmdLiteral -Value $FrontendRoot
+$escapedNpmExe = Convert-ToCmdLiteral -Value $NpmExe
+$frontendCommand = "pushd `"$escapedFrontendRoot`" && `"$escapedNpmExe`" run dev && popd"
 $frontendProcess = Start-Process `
     -FilePath "cmd.exe" `
     -ArgumentList @("/k", $frontendCommand) `
-    -WorkingDirectory $FrontendRoot `
+    -WorkingDirectory $env:SystemRoot `
     -PassThru
 
 Start-Sleep -Seconds 5

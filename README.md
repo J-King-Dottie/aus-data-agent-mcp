@@ -85,30 +85,16 @@ python3 scripts/build_comtrade_metadata.py
 - Frontend dev server with HMR: `http://127.0.0.1:3000`
 - Backend: `http://127.0.0.1:5000`
 
-Run from the repo root in PowerShell.
+Use PowerShell with WSL:
 
-First run:
+Daily use
+1. Open terminal 1 and run:
+   wsl bash -lc "cd /home/projects/abs-mcp && ./start-backend-wsl.sh"
+2. Open terminal 2 and run:
+   wsl bash -lc "cd /home/projects/abs-mcp/frontend && npm run dev -- --host 127.0.0.1 --port 3000"
 
-```powershell
-.\start-dev.ps1
-```
-
-Later runs:
-
-```powershell
-.\start-dev.ps1 -SkipInstall
-```
-
-If you see `'vite' is not recognized as an internal or external command`, your `frontend/node_modules` was likely installed from WSL/Linux rather than from Windows. Run:
-
-```powershell
-.\start-dev.ps1
-```
-
-That reinstalls the frontend dependencies with the Windows `vite.cmd` shim that `npm run dev` expects.
-
-If you want backend auto-reload:
-
-```powershell
-.\start-dev.ps1 -SkipInstall -Reload
-```
+Full reinstall
+1. Open terminal 1 and run:
+   wsl bash -lc "cd /home/projects/abs-mcp && rm -rf .venv-wsl && python3 -m venv .venv-wsl && source .venv-wsl/bin/activate && python3 -m pip install -r backend/requirements.txt"
+2. Open terminal 2 and run:
+   wsl bash -lc "cd /home/projects/abs-mcp/frontend && rm -rf node_modules package-lock.json && npm install && npm run dev -- --host 127.0.0.1 --port 3000"

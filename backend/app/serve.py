@@ -16,10 +16,12 @@ def main() -> int:
     reload_kwargs = {}
     if args.reload:
         reload_kwargs = {
-            "reload_dirs": [str(Path(__file__).resolve().parents[2] / "backend"), str(Path(__file__).resolve().parents[2] / "frontend")],
+            "reload_dirs": [str(Path(__file__).resolve().parents[2] / "backend")],
             "reload_excludes": [
                 ".venv/*",
                 ".venv/**",
+                ".venv-wsl/*",
+                ".venv-wsl/**",
                 "node_modules/*",
                 "node_modules/**",
                 "frontend/node_modules/*",
