@@ -53,6 +53,11 @@ CODE_CONTAINER_ID = str(os.getenv("NISABA_CODE_CONTAINER_ID") or "").strip()
 OPENAI_API_KEY = str(os.getenv("OPENAI_API_KEY") or "").strip()
 MAX_ANALYSIS_UPLOAD_BYTES = 50 * 1024 * 1024
 MAX_NARROW_ATTEMPTS_PER_ROOT_ARTIFACT = 3
+MCP_ANALYST_PROMPT_PATH = PROJECT_ROOT / "MCP_ANALYST.md"
+
+
+def _mcp_instructions() -> str:
+    return MCP_ANALYST_PROMPT_PATH.read_text(encoding="utf-8").strip()
 
 
 def _cid_prefix() -> str:
@@ -1063,16 +1068,7 @@ def _retrieve_macro_from_record(
 server = FastMCP(
     name="nisaba-mcp",
     website_url="https://github.com/J-King-Dottie/ausdata-ai-harness",
-    instructions=(
-        "Nisaba is a unified MCP for Australian public data and global macro context. "
-        "Workflow: search_catalog -> get_metadata only when required -> retrieve -> inspect_artifact -> narrow_artifact only when needed. "
-        "Prefer Australian domestic sources for Australian questions; use global macro sources for context or comparison. "
-        "Do not invent dataset ids, ABS anchors, provider ids, Comtrade codes, or raw ABS dataKeys. "
-        "For ABS, call get_metadata first, then retrieve with anchorType and anchorCode so the server can build the wildcard key. "
-        "Treat search results as a candidate pool, not a guaranteed ranking; choose the most specific dataset that answers the requested slice. "
-        "Use batch arguments only for 2 or 3 independent jobs. Keep dependent steps serial. "
-        "If the right candidate remains ambiguous after light inspection, ask one short clarification instead of looping."
-    ),
+    instructions=_mcp_instructions(),
 )
 
 
