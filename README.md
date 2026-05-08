@@ -2,9 +2,13 @@
 
 Nisaba is an open source MCP data harness for Australian public data, with global macro sources for context and comparison.
 
-It builds on existing open source projects including [mcp-server-abs](https://github.com/seansoreilly/mcp-server-abs) and [openecon-data](https://github.com/hanlulong/openecon-data). We continue to expand it. 
+Nisaba is named for the Mesopotamian goddess of writing, accounting, grain, and recorded measure. The aim is the same: careful records, grounded interpretation, and less economic guesswork.
 
-The goal is simple: one catalog, one MCP surface, and source-specific retrieval adapters behind it.
+The purpose is not to make an AI skim the web for shallow answers. The purpose is to get real public data into the model in a usable shape, then guide it to analyze national statistics with care.
+
+It builds on existing open source projects including [mcp-server-abs](https://github.com/seansoreilly/mcp-server-abs) and [openecon-data](https://github.com/hanlulong/openecon-data). We continue to expand it.
+
+The goal is simple: one catalog, one MCP surface, source-specific retrieval adapters behind it, and analyst instructions that teach the model how to reason with economic data.
 
 If you are technical, clone the repo, add your API key, and run it locally. If you are not, we have built a simple hosted web app on top of the MCP server. Log in, ask a question, get a grounded answer. That version is not free; we pass through the raw AI cost and add 10% to cover hosting. The repo is fully open source either way.
 
@@ -31,6 +35,7 @@ Produced by [Dottie AI Studio](https://dottieaistudio.com.au/).
 - Shortlists datasets across ABS, RBA, DCCEEW, OECD, World Bank, IMF, and UN Comtrade.
 - Retrieves data through source-specific adapters instead of guessed URLs or fake table keys.
 - Stores large results as artifacts, then supports inspection and narrowing before analysis.
+- Ships analyst instructions for source choice, statistical caution, derived metrics, charting, and uncertainty.
 - Runs directly as MCP or through the included web app.
 
 ## How It Works
