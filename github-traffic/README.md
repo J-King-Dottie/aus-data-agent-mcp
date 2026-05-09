@@ -1,18 +1,18 @@
-# GitHub traffic history
+# GitHub Traffic
 
-This directory stores daily snapshots from GitHub's repository traffic API.
+This directory stores the simple GitHub traffic numbers we care about.
 
-GitHub only exposes recent traffic, so the workflow in `.github/workflows/collect-github-traffic.yml`
-merges the current rolling window into CSV files once per day.
+The workflow in `.github/workflows/collect-github-traffic.yml` runs once per day and merges GitHub's rolling traffic window into:
 
-- `clones.csv`: daily clone counts and daily unique cloners
-- `views.csv`: daily view counts and daily unique viewers
-- `popular_paths.csv`: daily snapshot of GitHub's current top viewed paths
-- `popular_referrers.csv`: daily snapshot of GitHub's current top referrers
-- `summary.json`: known totals from the saved CSV rows
+- `clones.csv`: total clones and unique cloners by day
+- `views.csv`: total views and unique viewers by day
 
-The `uniques` values are daily unique counts. Summing them is useful as a daily activity signal, but it is not the same as all-time unique people because the same person can appear on multiple days.
+Each CSV ends with a `TOTAL` row. `count` is the total event count. `uniques` is the sum of GitHub's daily unique count, so it is a useful activity signal but not a true all-time person-level dedupe.
 
-GitHub exposes path and referrer traffic as a short rolling top list, not a permanent history. The snapshot CSVs preserve each daily top list so visitor sources and pages can be tracked over time.
+Interpretation:
+
+- Views are a rough signal of human attention.
+- Clones are a rough signal of intentional use.
+- High views plus high clones can suggest AI-agent use, because agents often inspect then clone/use the repo.
 
 The workflow needs a `TRAFFIC_TOKEN` repository secret with access to the repository traffic API.
