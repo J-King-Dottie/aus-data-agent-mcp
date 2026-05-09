@@ -1,6 +1,6 @@
-# AusData AI Harness MCP
+# Aus Data Agent MCP
 
-AusData AI Harness is a unified MCP server for Australian public data with global macro context. It is designed for AI agents that need to discover, retrieve, inspect, narrow, and analyze real datasets rather than answer from web snippets.
+Aus Data Agent MCP is a unified MCP server for Australian public data with global macro context. It is designed for AI agents that need to discover, retrieve, inspect, narrow, and analyze real datasets rather than answer from web snippets.
 
 Produced by Dottie AI Studio: https://dottieaistudio.com.au/
 
@@ -10,6 +10,7 @@ Primary entrypoints:
 - AGENTS.md: development and architecture guidance
 - .mcp.json: project-scoped MCP server config
 - backend/app/unified_mcp_server.py: MCP tool surface
+- frontend/: app layer in development, not yet the public-ready agent surface
 - UNIFIED_CATALOG_FULL.json: checked-in unified catalog snapshot
 
 Core MCP tools:

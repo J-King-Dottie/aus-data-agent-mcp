@@ -1,6 +1,6 @@
-# AusData AI Harness MCP
+# Aus Data Agent MCP
 
-A unified MCP server and optional web app for AI agents working with Australian public data, plus global macro sources for context and comparison.
+A unified MCP server for AI agents working with Australian public data, plus global macro sources for context and comparison.
 
 Produced by [Dottie AI Studio](https://dottieaistudio.com.au/).
 
@@ -57,7 +57,7 @@ Useful discovery keywords:
 - `backend/app/domestic_data.py`: ABS and Australian domestic retrieval.
 - `backend/app/macro_data.py`: OECD, World Bank, IMF, RBA, UN Comtrade, and related macro retrieval.
 - `scripts/build_unified_catalog.py`: rebuilds the unified catalog and FTS index.
-- `frontend/`: optional hosted/web-app layer on top of the MCP.
+- `frontend/`: app layer being developed on top of the MCP.
 
 The checked-in catalog is a discovery index, not a raw data mirror. Large retrieved results are stored as runtime artifacts so agents can inspect and narrow before analysis.
 
@@ -103,9 +103,9 @@ Refresh the local UN Comtrade metadata bundle:
 python3 scripts/build_comtrade_metadata.py
 ```
 
-## Optional Web App
+## App Layer
 
-The repo also includes a web interface over the same retrieval stack.
+The repo still includes the app code in `frontend/` and the supporting backend code in `backend/`. The app is being developed as an interface over the MCP/retrieval stack, but the public-ready surface for agents is currently the MCP plus the analyst instructions.
 
 - Frontend dev server: `http://127.0.0.1:3000`
 - Backend: `http://127.0.0.1:5000`
