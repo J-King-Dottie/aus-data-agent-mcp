@@ -11,8 +11,8 @@ Each CSV ends with a `TOTAL` row. `count` is the total event count. `uniques` is
 
 Interpretation:
 
-- Views are a rough signal of human attention.
-- Clones are a rough signal of intentional use.
-- Low views plus high clones can suggest AI-agent use, because agents may clone/use the repo without much human browsing.
+- Views are a rough signal of human browsing because they usually require the GitHub page to be opened.
+- Clones are a stronger signal of intentional use because something chose to fetch the repo locally.
+- Low views plus high clones can suggest AI-agent use: agents can discover and inspect repos through search/API/tooling without creating many page views, then clone when the repo is useful.
 
 The workflow needs a `TRAFFIC_TOKEN` repository secret with access to the repository traffic API.
