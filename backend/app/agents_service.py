@@ -234,14 +234,14 @@ def _build_run_cost_payload(
     }
 
 
-MCP_ANALYST_PROMPT_PATH = PROJECT_ROOT / "MCP_ANALYST.md"
+SKILLS_PROMPT_PATH = PROJECT_ROOT / "skills.md"
 WEB_APP_PROMPT_PATH = PROJECT_ROOT / "WEB_APP.md"
 
 
 def _system_instructions() -> str:
     return "\n\n".join(
         path.read_text(encoding="utf-8").strip()
-        for path in (MCP_ANALYST_PROMPT_PATH, WEB_APP_PROMPT_PATH)
+        for path in (SKILLS_PROMPT_PATH, WEB_APP_PROMPT_PATH)
     )
 
 

@@ -53,11 +53,11 @@ CODE_CONTAINER_ID = str(os.getenv("NISABA_CODE_CONTAINER_ID") or "").strip()
 OPENAI_API_KEY = str(os.getenv("OPENAI_API_KEY") or "").strip()
 MAX_ANALYSIS_UPLOAD_BYTES = 50 * 1024 * 1024
 MAX_NARROW_ATTEMPTS_PER_ROOT_ARTIFACT = 3
-MCP_ANALYST_PROMPT_PATH = PROJECT_ROOT / "MCP_ANALYST.md"
+SKILLS_PROMPT_PATH = PROJECT_ROOT / "skills.md"
 
 
 def _mcp_instructions() -> str:
-    return MCP_ANALYST_PROMPT_PATH.read_text(encoding="utf-8").strip()
+    return SKILLS_PROMPT_PATH.read_text(encoding="utf-8").strip()
 
 
 def _cid_prefix() -> str:

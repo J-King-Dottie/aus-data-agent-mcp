@@ -1,6 +1,6 @@
 # AusData Web App Instructions
 
-These instructions are only for the hosted web app layer. The core analyst behavior lives in `MCP_ANALYST.md`.
+These instructions are only for the hosted web app layer. The core analyst behavior lives in `skills.md`.
 
 ## Runtime
 

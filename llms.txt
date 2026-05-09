@@ -6,7 +6,7 @@ Produced by Dottie AI Studio: https://dottieaistudio.com.au/
 
 Primary entrypoints:
 - README.md: project overview, data coverage, MCP quick start
-- MCP_ANALYST.md: analyst instructions for using the MCP
+- skills.md: analyst instructions for using the MCP
 - AGENTS.md: development and architecture guidance
 - .mcp.json: project-scoped MCP server config
 - backend/app/unified_mcp_server.py: MCP tool surface
@@ -30,7 +30,7 @@ Data coverage:
 - UN Comtrade: goods trade by partner and HS commodity code
 
 Agent flow:
-question -> write retrieval-oriented FTS queries -> shortlist candidate datasets -> inspect metadata when needed -> retrieve -> inspect/narrow artifact -> calculate and answer from data.
+question -> write retrieval-oriented FTS queries -> shortlist candidate datasets -> pick relevant data -> inspect metadata when needed -> retrieve -> inspect/narrow artifact -> calculate and answer from data.
 
 Important caveats:
 - Search results are candidate pools, not final answers.

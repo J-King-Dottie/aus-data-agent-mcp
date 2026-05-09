@@ -8,17 +8,17 @@ The project is built for evidence-led analysis:
 
 ```text
 question -> AI-written FTS queries over the unified catalog
--> shortlist candidate datasets -> inspect metadata when needed
+-> shortlist candidate datasets -> pick relevant data -> inspect metadata when needed
 -> retrieve source data -> inspect/narrow artifacts -> analyze
 ```
 
-The MCP does data discovery and retrieval. Analyst behavior lives in [MCP_ANALYST.md](MCP_ANALYST.md), and development guardrails live in [AGENTS.md](AGENTS.md).
+The MCP does data discovery and retrieval. Analyst behavior lives in [skills.md](skills.md), and development guardrails live in [AGENTS.md](AGENTS.md).
 
 ## For AI Agents
 
 Start with these files:
 
-- [MCP_ANALYST.md](MCP_ANALYST.md): how to use the MCP as a careful economic/statistical analyst.
+- [skills.md](skills.md): how to use the MCP as a careful economic/statistical analyst.
 - [AGENTS.md](AGENTS.md): project architecture and development rules.
 - [backend/app/unified_mcp_server.py](backend/app/unified_mcp_server.py): MCP tool surface.
 - [.mcp.json](.mcp.json): project-scoped MCP config.
@@ -27,7 +27,8 @@ Start with these files:
 Core tool flow:
 
 ```text
-search_catalog -> get_metadata when needed -> retrieve -> inspect_artifact -> narrow_artifact
+AI-written query -> search_catalog -> pick data -> get_metadata when needed
+-> retrieve -> inspect_artifact -> narrow_artifact -> analyze
 ```
 
 Search results are candidate pools. The AI analyst should choose datasets from the shortlist, inspect structure, retrieve real data, and only then answer.
