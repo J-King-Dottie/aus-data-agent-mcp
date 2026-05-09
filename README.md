@@ -117,22 +117,8 @@ wsl bash -lc "cd /home/projects/abs-mcp && ./start-backend-wsl.sh"
 wsl bash -lc "cd /home/projects/abs-mcp/frontend && npm run dev -- --host 127.0.0.1 --port 3000"
 ```
 
-## GitHub Traffic Tracking
-
-The repo includes `.github/workflows/collect-github-traffic.yml` and `scripts/collect_github_traffic.py`.
-
-It saves:
-
-- daily clone counts and unique cloners
-- daily view counts and unique visitors
-- daily snapshots of popular paths
-- daily snapshots of popular referrers
-
-The workflow needs a `TRAFFIC_TOKEN` repository secret with access to GitHub traffic APIs.
-
 ## Smoke Checks
 
 ```bash
-python3 -m py_compile scripts/collect_github_traffic.py
 python3 -m py_compile backend/app/*.py
 ```
