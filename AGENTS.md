@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This repo builds Nisaba: an agentic Australian data harness.
+This repo builds AusData AI Harness: an agentic Australian public-data MCP with global macro context.
 
 The core goal is not generic economic QA.
 The goal is deep, grounded, detailed retrieval over Australian public data, with global macro sources available mainly for context and comparison.
@@ -50,7 +50,7 @@ There is now a repo-level MCP config at:
 The direction is increasingly MCP-first:
 
 - reusable retrieval guidance should live in MCP server instructions and tool descriptions where practical
-- app-only guidance such as progress updates, response style, and hosted UX behavior should stay in the Nisaba system prompt
+- app-only guidance such as progress updates, response style, and hosted UX behavior should stay in the web-app system prompt
 - the web app should be treated as a layer on top of the MCP servers, not the only way the system can be used
 
 ## Unified catalog architecture

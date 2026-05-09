@@ -1,6 +1,6 @@
 {
   "mcpServers": {
-    "nisaba": {
+    "ausdata": {
       "command": "python",
       "args": [
         "-m",

@@ -1,0 +1,39 @@
+# AusData AI Harness MCP
+
+AusData AI Harness is a unified MCP server for Australian public data with global macro context. It is designed for AI agents that need to discover, retrieve, inspect, narrow, and analyze real datasets rather than answer from web snippets.
+
+Primary entrypoints:
+- README.md: project overview, data coverage, MCP quick start
+- MCP_ANALYST.md: analyst instructions for using the MCP
+- AGENTS.md: development and architecture guidance
+- .mcp.json: project-scoped MCP server config
+- backend/app/unified_mcp_server.py: MCP tool surface
+- UNIFIED_CATALOG_FULL.json: checked-in unified catalog snapshot
+
+Core MCP tools:
+- search_catalog
+- get_metadata
+- retrieve
+- inspect_artifact
+- narrow_artifact
+
+Data coverage:
+- ABS: Australian official statistics including labour, CPI, population, national accounts, trade, housing, business, agriculture, census and more
+- RBA: cash rate, exchange rates, money, credit, bank balance sheets, payments, financial markets
+- DCCEEW: Australian Energy Statistics electricity generation by fuel type
+- OECD: international comparison datasets
+- World Bank: WDI and broader development indicators
+- IMF: macro-financial indicators
+- UN Comtrade: goods trade by partner and HS commodity code
+
+Agent flow:
+question -> write retrieval-oriented FTS queries -> shortlist candidate datasets -> inspect metadata when needed -> retrieve -> inspect/narrow artifact -> calculate and answer from data.
+
+Important caveats:
+- Search results are candidate pools, not final answers.
+- Do not invent dataset IDs, filters, codes, or source keys.
+- Prefer ABS for Australian domestic questions when it can answer the question.
+- Use global macro sources for comparison, context, or where Australian domestic data cannot answer directly.
+
+Useful keywords:
+Australian public data, MCP, AI agent, ABS, Australian Bureau of Statistics, RBA, Reserve Bank of Australia, DCCEEW, OECD, World Bank, WDI, IMF, UN Comtrade, economic data, labour force, CPI, inflation, GDP, population, migration, trade, housing, energy, electricity generation, financial markets.

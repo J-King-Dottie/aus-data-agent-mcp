@@ -1066,7 +1066,7 @@ def _retrieve_macro_from_record(
 
 
 server = FastMCP(
-    name="nisaba-mcp",
+    name="ausdata-mcp",
     website_url="https://github.com/J-King-Dottie/ausdata-ai-harness",
     instructions=_mcp_instructions(),
 )

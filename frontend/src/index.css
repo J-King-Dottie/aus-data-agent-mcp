@@ -549,7 +549,7 @@ body {
   color: rgba(30, 43, 33, 0.72);
 }
 
-.nisaba-loader {
+.ausdata-loader {
   width: 1.35rem;
   height: 1.0125rem;
   display: block;
@@ -557,12 +557,12 @@ body {
   color: #7d8b80;
 }
 
-.nisaba-loader-group {
+.ausdata-loader-group {
   transform-origin: center;
-  animation: nisabaLoaderGlow 3s ease-in-out infinite;
+  animation: ausdataLoaderGlow 3s ease-in-out infinite;
 }
 
-.nisaba-stroke {
+.ausdata-stroke {
   fill: none;
   stroke: currentColor;
   stroke-width: 4.4;
@@ -570,73 +570,73 @@ body {
   stroke-linejoin: round;
   stroke-dasharray: 1;
   stroke-dashoffset: 1;
-  animation-name: nisabaDraw;
+  animation-name: ausdataDraw;
   animation-duration: 3s;
   animation-timing-function: ease;
   animation-iteration-count: infinite;
 }
 
-.nisaba-border {
+.ausdata-border {
   stroke-width: 8;
 }
 
-.nisaba-stroke-1 {
+.ausdata-stroke-1 {
   animation-delay: 0s;
 }
 
-.nisaba-stroke-2 {
+.ausdata-stroke-2 {
   animation-delay: 0.42s;
 }
 
-.nisaba-stroke-3 {
+.ausdata-stroke-3 {
   animation-delay: 0.57s;
 }
 
-.nisaba-stroke-4 {
+.ausdata-stroke-4 {
   animation-delay: 0.72s;
 }
 
-.nisaba-stroke-5 {
+.ausdata-stroke-5 {
   animation-delay: 0.87s;
 }
 
-.nisaba-wedge {
+.ausdata-wedge {
   color: inherit;
 }
 
-.nisaba-wedge-line {
+.ausdata-wedge-line {
   fill: none;
   stroke: currentColor;
   stroke-width: 4.1;
   stroke-linecap: round;
   stroke-dasharray: 1;
   stroke-dashoffset: 1;
-  animation: nisabaDraw 3s ease infinite;
+  animation: ausdataDraw 3s ease infinite;
 }
 
-.nisaba-wedge-press {
+.ausdata-wedge-press {
   fill: currentColor;
   opacity: 0;
-  animation: nisabaPress 3s ease infinite;
+  animation: ausdataPress 3s ease infinite;
 }
 
-.nisaba-stroke-2 .nisaba-wedge-line,
-.nisaba-stroke-2 .nisaba-wedge-press {
+.ausdata-stroke-2 .ausdata-wedge-line,
+.ausdata-stroke-2 .ausdata-wedge-press {
   animation-delay: 0.42s;
 }
 
-.nisaba-stroke-3 .nisaba-wedge-line,
-.nisaba-stroke-3 .nisaba-wedge-press {
+.ausdata-stroke-3 .ausdata-wedge-line,
+.ausdata-stroke-3 .ausdata-wedge-press {
   animation-delay: 0.57s;
 }
 
-.nisaba-stroke-4 .nisaba-wedge-line,
-.nisaba-stroke-4 .nisaba-wedge-press {
+.ausdata-stroke-4 .ausdata-wedge-line,
+.ausdata-stroke-4 .ausdata-wedge-press {
   animation-delay: 0.72s;
 }
 
-.nisaba-stroke-5 .nisaba-wedge-line,
-.nisaba-stroke-5 .nisaba-wedge-press {
+.ausdata-stroke-5 .ausdata-wedge-line,
+.ausdata-stroke-5 .ausdata-wedge-press {
   animation-delay: 0.87s;
 }
 
@@ -864,7 +864,7 @@ body {
   display: block;
 }
 
-@keyframes nisabaDraw {
+@keyframes ausdataDraw {
   0%,
   8% {
     stroke-dashoffset: 1;
@@ -881,7 +881,7 @@ body {
   }
 }
 
-@keyframes nisabaPress {
+@keyframes ausdataPress {
   0%,
   14% {
     opacity: 0;
@@ -895,7 +895,7 @@ body {
   }
 }
 
-@keyframes nisabaLoaderGlow {
+@keyframes ausdataLoaderGlow {
   0%,
   72%,
   100% {

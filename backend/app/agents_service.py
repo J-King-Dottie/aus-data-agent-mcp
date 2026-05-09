@@ -252,7 +252,7 @@ def _openai_client() -> OpenAI:
 
 def _create_code_container(conversation_id: str) -> str:
     container = _openai_client().containers.create(
-        name=f"nisaba-{conversation_id[:24]}",
+        name=f"ausdata-{conversation_id[:24]}",
         memory_limit="1g",
     )
     return str(container.id)
@@ -316,7 +316,7 @@ def _model_retry_policy(context: RetryPolicyContext) -> bool | RetryDecision:
 
 def _build_agent(code_container_id: str) -> Agent[Any]:
     return Agent(
-        name="Nisaba",
+        name="AusData",
         model=settings.openai_model,
         instructions=_system_instructions(),
         tools=[
@@ -361,7 +361,7 @@ def _integrated_mcp_server_for_conversation(conversation_id: str, code_container
                 "OPENAI_API_KEY": settings.openai_api_key,
             },
         },
-        name="nisaba",
+        name="ausdata",
         client_session_timeout_seconds=max(120, settings.macro_timeout_seconds),
         cache_tools_list=True,
         tool_filter=create_static_tool_filter(

@@ -613,17 +613,17 @@ function ChartBlock({ spec }: { spec: ChartSpec }) {
   );
 }
 
-function NisabaLoader() {
+function AusDataLoader() {
   return (
     <svg
-      className="nisaba-loader"
+      className="ausdata-loader"
       viewBox="0 0 80 60"
       role="img"
       aria-hidden="true"
     >
-      <g className="nisaba-loader-group">
+      <g className="ausdata-loader-group">
         <rect
-          className="nisaba-stroke nisaba-border nisaba-stroke-1"
+          className="ausdata-stroke ausdata-border ausdata-stroke-1"
           x="8"
           y="7"
           width="64"
@@ -632,21 +632,21 @@ function NisabaLoader() {
           pathLength={1}
         />
 
-        <g className="nisaba-wedge nisaba-stroke-2">
-          <line className="nisaba-wedge-line" x1="26" y1="24" x2="39" y2="19" pathLength={1} />
-          <path className="nisaba-wedge-press" d="M19 25 L26 19 L26 29 Z" />
+        <g className="ausdata-wedge ausdata-stroke-2">
+          <line className="ausdata-wedge-line" x1="26" y1="24" x2="39" y2="19" pathLength={1} />
+          <path className="ausdata-wedge-press" d="M19 25 L26 19 L26 29 Z" />
         </g>
-        <g className="nisaba-wedge nisaba-stroke-3">
-          <line className="nisaba-wedge-line" x1="45" y1="24" x2="58" y2="19" pathLength={1} />
-          <path className="nisaba-wedge-press" d="M38 25 L45 19 L45 29 Z" />
+        <g className="ausdata-wedge ausdata-stroke-3">
+          <line className="ausdata-wedge-line" x1="45" y1="24" x2="58" y2="19" pathLength={1} />
+          <path className="ausdata-wedge-press" d="M38 25 L45 19 L45 29 Z" />
         </g>
-        <g className="nisaba-wedge nisaba-stroke-4">
-          <line className="nisaba-wedge-line" x1="33" y1="40" x2="46" y2="35" pathLength={1} />
-          <path className="nisaba-wedge-press" d="M26 41 L33 35 L33 45 Z" />
+        <g className="ausdata-wedge ausdata-stroke-4">
+          <line className="ausdata-wedge-line" x1="33" y1="40" x2="46" y2="35" pathLength={1} />
+          <path className="ausdata-wedge-press" d="M26 41 L33 35 L33 45 Z" />
         </g>
-        <g className="nisaba-wedge nisaba-stroke-5">
-          <line className="nisaba-wedge-line" x1="52" y1="40" x2="65" y2="35" pathLength={1} />
-          <path className="nisaba-wedge-press" d="M45 41 L52 35 L52 45 Z" />
+        <g className="ausdata-wedge ausdata-stroke-5">
+          <line className="ausdata-wedge-line" x1="52" y1="40" x2="65" y2="35" pathLength={1} />
+          <path className="ausdata-wedge-press" d="M45 41 L52 35 L52 45 Z" />
         </g>
       </g>
     </svg>
@@ -976,7 +976,7 @@ function ProductTitle() {
     <div className="product-title">
       <div className="product-title-text">
         <div className="product-title-row product-title-row-main">
-          <h1>Nisaba</h1>
+          <h1>AusData AI Harness</h1>
         </div>
         <div className="product-title-row product-title-row-subtitle">
           <div className="product-subtitle-group">
@@ -991,23 +991,17 @@ function ProductTitle() {
                 </svg>
                 <div className="header-tooltip info-tooltip" role="tooltip">
                   <p>
-                    In Sumerian mythology, Nisaba was the goddess of writing,
-                    accounting, and the keeping of records.
+                    AusData AI Harness is built for Australian analysts who need
+                    real public data, not generic web summaries.
                   </p>
                   <p>
-                    Writing emerged in Mesopotamian bureaucracies to count what
-                    mattered. Grain, livestock, labour, taxes.
+                    It combines Australian domestic data from ABS, RBA, DCCEEW
+                    and other public sources with global macro context from
+                    OECD, World Bank, IMF, and UN Comtrade.
                   </p>
                   <p>
-                    This system does the same. Designed for Australian analysts,
-                    it combines detailed domestic data with global macro
-                    sources.
-                  </p>
-                  <p>
-                    Nisaba is not a general chatbot. It is a data discovery,
-                    retrieval, and analysis workflow. Use Claude or ChatGPT for
-                    broad research. Use Nisaba when you want actual data, from
-                    the actual source.
+                    It is a data discovery, retrieval, and analysis workflow.
+                    Use it when you want actual data from the actual source.
                   </p>
                   <p>
                     Produced by{" "}
@@ -1794,7 +1788,7 @@ function App() {
               <div className="empty-state-note">
                 <div className="empty-state-note-group">
                   <p>Designed for detailed Australian analysis and global macro comparison.</p>
-                  <p>Use Nisaba when you want actual data, from the actual source.</p>
+                  <p>Use AusData when you want actual data, from the actual source.</p>
                   <p>Performs best on targeted questions. Break complex queries down.</p>
                 </div>
               </div>
@@ -1849,7 +1843,7 @@ function App() {
                   </div>
                 ) : (
                   <div className="thinking-line" aria-live="polite" aria-label="Thinking">
-                    <NisabaLoader />
+                    <AusDataLoader />
                   </div>
                 )}
               </article>
@@ -1911,7 +1905,7 @@ function App() {
               onChange={(event) => setInput(event.target.value)}
               onKeyDown={handleComposerKeyDown}
               onBeforeInput={handleComposerBeforeInput}
-              placeholder="Ask Nisaba your economic questions..."
+              placeholder="Ask AusData your economic questions..."
               enterKeyHint="send"
               rows={1}
             />

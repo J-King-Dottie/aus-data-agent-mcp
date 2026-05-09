@@ -1,7 +1,7 @@
 {
   "name": "abs-mcp-server",
   "version": "0.1.0",
-  "description": "Nisaba unified MCP server",
+  "description": "Unified MCP server for Australian public data and global macro context",
   "private": true,
   "type": "module",
   "scripts": {
@@ -9,6 +9,6 @@
     "build:frontend": "npm --prefix frontend run build",
     "build:all": "npm run build",
     "start": "python -m backend.app.unified_mcp_server",
-    "mcp:nisaba": "python -m backend.app.unified_mcp_server"
+    "mcp:ausdata": "python -m backend.app.unified_mcp_server"
   }
 }

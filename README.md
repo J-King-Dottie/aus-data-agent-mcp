@@ -1,105 +1,136 @@
-## Nisaba
+# AusData AI Harness MCP
 
-Nisaba is an open source MCP data harness for Australian public data, with global macro sources for context and comparison.
+A unified MCP server and optional web app for AI agents working with Australian public data, plus global macro sources for context and comparison.
 
-Nisaba is named for the Mesopotamian goddess of writing, accounting, grain, and recorded measure. The aim is the same: careful records, grounded interpretation, and less economic guesswork.
-
-The purpose is not to make an AI skim the web for shallow answers. The purpose is to get real public data into the model in a usable shape, then guide it to analyze national statistics with care.
-
-It builds on existing open source projects including [mcp-server-abs](https://github.com/seansoreilly/mcp-server-abs) and [openecon-data](https://github.com/hanlulong/openecon-data). We continue to expand it.
-
-The goal is simple: one catalog, one MCP surface, source-specific retrieval adapters behind it, and analyst instructions that teach the model how to reason with economic data.
-
-If you are technical, clone the repo, add your API key, and run it locally. If you are not, we have built a simple hosted web app on top of the MCP server. Log in, ask a question, get a grounded answer. That version is not free; we pass through the raw AI cost and add 10% to cover hosting. The repo is fully open source either way.
-
-Here is what is currently plugged into the unified catalog:
-
-| Provider | Datasets |
-| --- | ---: |
-| ABS | 1,221 |
-| DCCEEW | 1 |
-| RBA | 71 |
-| OECD | 1,464 |
-| World Bank | 28,377 |
-| IMF | 132 |
-| UN Comtrade | 1 |
-
-This product is heavily vibecoded and tested by outcomes rather than code review. It does not work perfectly every time, but it works well most of the time.
-
-We want people to suggest additional integrations so the system can grow into the strongest open source for AI-driven and Australian focused data analysis in the world.
-
-Produced by [Dottie AI Studio](https://dottieaistudio.com.au/).
-
-## What It Does
-
-- Shortlists datasets across ABS, RBA, DCCEEW, OECD, World Bank, IMF, and UN Comtrade.
-- Retrieves data through source-specific adapters instead of guessed URLs or fake table keys.
-- Stores large results as artifacts, then supports inspection and narrowing before analysis.
-- Ships analyst instructions for source choice, statistical caution, derived metrics, charting, and uncertainty.
-- Runs directly as MCP or through the included web app.
-
-## How It Works
-
-Nisaba uses one built catalog snapshot for discovery. `search_catalog` runs local SQLite FTS over that catalog, returns a candidate pool, and the agent chooses the best dataset before source-specific retrieval begins.
-
-The flow is:
+The project is built for evidence-led analysis:
 
 ```text
-catalog FTS -> AI dataset selection -> metadata when needed -> source adapter -> artifact -> inspect/narrow -> analysis
+question -> AI-written FTS queries over the unified catalog
+-> shortlist candidate datasets -> inspect metadata when needed
+-> retrieve source data -> inspect/narrow artifacts -> analyze
 ```
 
-The checked-in catalog makes first-run discovery fast and reliable after clone. It is intentionally included, not a raw data mirror.
+The MCP does data discovery and retrieval. Analyst behavior lives in [MCP_ANALYST.md](MCP_ANALYST.md), and development guardrails live in [AGENTS.md](AGENTS.md).
 
-## Requirements
+## For AI Agents
 
-- Python
-- Node.js and npm
-- `OPENAI_API_KEY` set in `.env`
+Start with these files:
 
-Example `.env`:
+- [MCP_ANALYST.md](MCP_ANALYST.md): how to use the MCP as a careful economic/statistical analyst.
+- [AGENTS.md](AGENTS.md): project architecture and development rules.
+- [backend/app/unified_mcp_server.py](backend/app/unified_mcp_server.py): MCP tool surface.
+- [.mcp.json](.mcp.json): project-scoped MCP config.
+- [UNIFIED_CATALOG_FULL.json](UNIFIED_CATALOG_FULL.json): checked-in unified catalog snapshot.
 
-```env
-OPENAI_API_KEY=your_key_here
+Core tool flow:
+
+```text
+search_catalog -> get_metadata when needed -> retrieve -> inspect_artifact -> narrow_artifact
 ```
 
-## Direct MCP Use
+Search results are candidate pools. The AI analyst should choose datasets from the shortlist, inspect structure, retrieve real data, and only then answer.
 
-The repo can be used directly as MCP, not just through the hosted app.
+## Data Coverage
 
-- Unified MCP server: `python -m backend.app.unified_mcp_server`
-- Core tool flow: `search_catalog` -> `get_metadata` when needed -> `retrieve` -> `inspect_artifact` -> `narrow_artifact` when needed
+The checked-in unified catalog currently includes `31,309` entries:
 
-If your local MCP client supports a project-scoped `.mcp.json`, the repo includes one at the root with the unified server already defined.
+| Provider | Catalog entries | Typical use |
+| --- | ---: | --- |
+| World Bank | 28,413 | Global macro, development, population, poverty, education, health, trade, energy, climate, finance, governance |
+| OECD | 1,470 | International comparisons, regions, labour, education, health, productivity, government, transport, income, prices |
+| ABS | 1,221 | Australian official statistics: labour, population, CPI, national accounts, business, trade, housing, census, health, agriculture, industry |
+| IMF | 132 | Macro-financial context: debt, money, credit, trade categories, AI preparedness, financial openness |
+| Reserve Bank of Australia | 71 | Rates, exchange rates, money, credit, bank balance sheets, payments, financial markets |
+| DCCEEW | 1 | Australian Energy Statistics Table O: electricity generation by fuel type |
+| UN Comtrade | 1 | Goods imports/exports by partner and HS commodity code |
 
-Some catalog and metadata assets are built snapshots and need to be refreshed manually when needed:
+Useful discovery keywords:
 
-- Refresh the unified catalog and FTS index:
+`ABS`, `Australian Bureau of Statistics`, `labour force`, `employment`, `unemployment`, `CPI`, `inflation`, `wages`, `population`, `migration`, `births`, `deaths`, `national accounts`, `GDP`, `household spending`, `retail`, `building approvals`, `housing`, `lending`, `business indicators`, `international trade`, `exports`, `imports`, `census`, `agriculture`, `energy generation`, `electricity by fuel`, `RBA`, `cash rate`, `exchange rates`, `interest rates`, `credit`, `financial institutions`, `OECD`, `World Bank`, `WDI`, `IMF`, `Comtrade`, `HS code`, `partner country`.
+
+## Architecture
+
+- `backend/app/unified_mcp_server.py`: unified MCP server.
+- `backend/app/unified_catalog.py`: catalog loading and SQLite FTS search.
+- `backend/app/domestic_data.py`: ABS and Australian domestic retrieval.
+- `backend/app/macro_data.py`: OECD, World Bank, IMF, RBA, UN Comtrade, and related macro retrieval.
+- `scripts/build_unified_catalog.py`: rebuilds the unified catalog and FTS index.
+- `frontend/`: optional hosted/web-app layer on top of the MCP.
+
+The checked-in catalog is a discovery index, not a raw data mirror. Large retrieved results are stored as runtime artifacts so agents can inspect and narrow before analysis.
+
+## Quick Start
+
+```bash
+python3 -m venv .venv-wsl
+source .venv-wsl/bin/activate
+python3 -m pip install -r backend/requirements.txt
+```
+
+Run the MCP server:
+
+```bash
+python -m backend.app.unified_mcp_server
+```
+
+Example project MCP config:
+
+```json
+{
+  "mcpServers": {
+    "ausdata": {
+      "command": "python",
+      "args": ["-m", "backend.app.unified_mcp_server"],
+      "cwd": "."
+    }
+  }
+}
+```
+
+## Refreshing Catalog Assets
+
+Refresh the unified catalog and FTS index:
 
 ```bash
 python3 scripts/build_unified_catalog.py
 ```
 
-- Refresh the local UN Comtrade metadata bundle:
+Refresh the local UN Comtrade metadata bundle:
 
 ```bash
 python3 scripts/build_comtrade_metadata.py
 ```
 
-## Local Dev
+## Optional Web App
 
-- Frontend dev server with HMR: `http://127.0.0.1:3000`
+The repo also includes a web interface over the same retrieval stack.
+
+- Frontend dev server: `http://127.0.0.1:3000`
 - Backend: `http://127.0.0.1:5000`
 
-Use PowerShell with WSL:
+Daily local development from PowerShell with WSL:
 
-Daily use
-1. Open terminal 1 and run:
-   wsl bash -lc "cd /home/projects/abs-mcp && ./start-backend-wsl.sh"
-2. Open terminal 2 and run:
-   wsl bash -lc "cd /home/projects/abs-mcp/frontend && npm run dev -- --host 127.0.0.1 --port 3000"
+```powershell
+wsl bash -lc "cd /home/projects/abs-mcp && ./start-backend-wsl.sh"
+wsl bash -lc "cd /home/projects/abs-mcp/frontend && npm run dev -- --host 127.0.0.1 --port 3000"
+```
 
-Full reinstall
-1. Open terminal 1 and run:
-   wsl bash -lc "cd /home/projects/abs-mcp && rm -rf .venv-wsl && python3 -m venv .venv-wsl && source .venv-wsl/bin/activate && python3 -m pip install -r backend/requirements.txt"
-2. Open terminal 2 and run:
-   wsl bash -lc "cd /home/projects/abs-mcp/frontend && rm -rf node_modules package-lock.json && npm install && npm run dev -- --host 127.0.0.1 --port 3000"
+## GitHub Traffic Tracking
+
+The repo includes `.github/workflows/collect-github-traffic.yml` and `scripts/collect_github_traffic.py`.
+
+It saves:
+
+- daily clone counts and unique cloners
+- daily view counts and unique visitors
+- daily snapshots of popular paths
+- daily snapshots of popular referrers
+
+The workflow needs a `TRAFFIC_TOKEN` repository secret with access to GitHub traffic APIs.
+
+## Smoke Checks
+
+```bash
+python3 -m py_compile scripts/collect_github_traffic.py
+python3 -m py_compile backend/app/*.py
+```

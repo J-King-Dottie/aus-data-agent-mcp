@@ -28,7 +28,7 @@ def _fetch_json(repo: str, metric: str, token: str) -> Any:
         headers={
             "Accept": "application/vnd.github+json",
             "Authorization": f"Bearer {token}",
-            "User-Agent": "nisaba-github-traffic-collector",
+            "User-Agent": "ausdata-github-traffic-collector",
             "X-GitHub-Api-Version": "2022-11-28",
         },
     )
