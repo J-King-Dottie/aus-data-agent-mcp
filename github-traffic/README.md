@@ -13,6 +13,6 @@ Interpretation:
 
 - Views are a rough signal of human attention.
 - Clones are a rough signal of intentional use.
-- High views plus high clones can suggest AI-agent use, because agents often inspect then clone/use the repo.
+- Low views plus high clones can suggest AI-agent use, because agents may clone/use the repo without much human browsing.
 
 The workflow needs a `TRAFFIC_TOKEN` repository secret with access to the repository traffic API.
