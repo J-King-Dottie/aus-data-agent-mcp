@@ -2,6 +2,8 @@
 
 A unified MCP server and optional web app for AI agents working with Australian public data, plus global macro sources for context and comparison.
 
+Produced by [Dottie AI Studio](https://dottieaistudio.com.au/).
+
 The project is built for evidence-led analysis:
 
 ```text
