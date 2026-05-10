@@ -4,6 +4,8 @@ A unified MCP server for AI agents working with Australian public data, plus glo
 
 Produced by [Dottie AI Studio](https://dottieaistudio.com.au/).
 
+Built on existing open source work including [seansoreilly/mcp-server-abs](https://github.com/seansoreilly/mcp-server-abs) and [hanlulong/openecon-data](https://github.com/hanlulong/openecon-data).
+
 The project is built for evidence-led analysis:
 
 ```text
@@ -117,10 +119,6 @@ Daily local development from PowerShell with WSL:
 wsl bash -lc "cd /home/projects/abs-mcp && ./start-backend-wsl.sh"
 wsl bash -lc "cd /home/projects/abs-mcp/frontend && npm run dev -- --host 127.0.0.1 --port 3000"
 ```
-
-## Credits
-
-Produced by [Dottie AI Studio](https://dottieaistudio.com.au/). This project builds on existing open source work including [seansoreilly/mcp-server-abs](https://github.com/seansoreilly/mcp-server-abs) and [hanlulong/openecon-data](https://github.com/hanlulong/openecon-data).
 
 ## Smoke Checks
 
