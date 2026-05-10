@@ -118,6 +118,10 @@ wsl bash -lc "cd /home/projects/abs-mcp && ./start-backend-wsl.sh"
 wsl bash -lc "cd /home/projects/abs-mcp/frontend && npm run dev -- --host 127.0.0.1 --port 3000"
 ```
 
+## Credits
+
+Produced by [Dottie AI Studio](https://dottieaistudio.com.au/). This project builds on the ABS MCP work in [seansoreilly/mcp-server-abs](https://github.com/seansoreilly/mcp-server-abs).
+
 ## Smoke Checks
 
 ```bash
