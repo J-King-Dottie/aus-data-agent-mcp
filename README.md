@@ -120,7 +120,7 @@ wsl bash -lc "cd /home/projects/abs-mcp/frontend && npm run dev -- --host 127.0.
 
 ## Credits
 
-Produced by [Dottie AI Studio](https://dottieaistudio.com.au/). This project builds on the ABS MCP work in [seansoreilly/mcp-server-abs](https://github.com/seansoreilly/mcp-server-abs).
+Produced by [Dottie AI Studio](https://dottieaistudio.com.au/). This project builds on existing open source work including [seansoreilly/mcp-server-abs](https://github.com/seansoreilly/mcp-server-abs) and [hanlulong/openecon-data](https://github.com/hanlulong/openecon-data).
 
 ## Smoke Checks
 
