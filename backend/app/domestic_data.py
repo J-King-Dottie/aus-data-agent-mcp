@@ -124,7 +124,10 @@ class ABSApiClient:
         )
         response.raise_for_status()
         if format_name == "jsondata":
-            return response.json()
+            payload = response.json()
+            if isinstance(payload, dict):
+                payload["api_request_url"] = str(response.request.url)
+            return payload
         return response.text
 
 
@@ -147,7 +150,10 @@ class CustomDomesticService:
     def resolve(self, flow: Dict[str, Any], *, data_key: str = "all", detail: str = "full") -> Dict[str, Any]:
         source_path = self._download_to_temp(flow)
         try:
-            return self._run_script("resolve", flow, source_path, data_key=data_key, detail=detail)
+            payload = self._run_script("resolve", flow, source_path, data_key=data_key, detail=detail)
+            if isinstance(payload, dict):
+                payload.setdefault("api_request_url", _clean_text(flow.get("sourceUrl")))
+            return payload
         finally:
             source_path.unlink(missing_ok=True)
 
@@ -605,6 +611,7 @@ class DomesticDataService:
             summary["endPeriod"] = query["endPeriod"]
         if query.get("dimensionAtObservation"):
             summary["dimensionAtObservation"] = query["dimensionAtObservation"]
+        api_request_url = _clean_text(payload.get("api_request_url")) if isinstance(payload, dict) else ""
         return {
             "dataset": {
                 "id": _clean_text(flow.get("id")),
@@ -614,6 +621,7 @@ class DomesticDataService:
                 "description": _clean_text(flow.get("description")),
             },
             "query": summary,
+            "api_request_url": api_request_url,
             "dimensions": dimension_lookup,
             "observationCount": observation_count,
             "series": series,

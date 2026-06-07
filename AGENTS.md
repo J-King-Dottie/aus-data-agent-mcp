@@ -8,7 +8,8 @@ This project is a polished, agent-facing MCP product for Australian public data 
 - `backend/app/unified_catalog.py` loads the unified catalogue and SQLite FTS index used for shortlist discovery.
 - `backend/app/domestic_data.py` contains ABS and Australian domestic retrieval.
 - `backend/app/macro_data.py` contains OECD, World Bank, IMF, RBA, UN Comtrade, and related macro retrieval.
-- `skills.md` is the single source of truth for analyst behavior, query expansion, dataset selection, evidence judgment, calculations, charting, caveats, and response standards.
+- `AGENT_SYSTEM_PROMPT.md` is the single source of truth for agent behavior, query expansion, dataset selection, evidence judgment, calculations, charting, caveats, and response standards.
+- MCP tool descriptions are the single source of truth for how to call each MCP tool.
 - `.mcp.json` is the project-scoped MCP configuration for agents that clone the repo.
 - `frontend/` and the web backend are the app layer. They should sit over the MCP/retrieval stack, not redefine the core analyst workflow.
 
@@ -19,7 +20,7 @@ Keep the same broad shape as the Pacific Data Hub Agent MCP:
 ```text
 README.md -> agent entrypoint and quick start
 AGENTS.md -> project architecture and development guardrails
-skills.md -> analyst behavior and evidence standards
+AGENT_SYSTEM_PROMPT.md -> agent system prompt and evidence standards
 .mcp.json -> MCP wiring for agents
 MCP server -> source-specific data capabilities
 ```
@@ -34,9 +35,10 @@ user question -> AI-written FTS queries -> catalogue shortlist
 
 ## Development Rules
 
-- Do not put analyst judgment into the MCP server. The MCP exposes data capabilities; `skills.md` tells the AI analyst how to use them.
-- When changing analysis behavior, chart choice, evidence standards, caveats, or response style, update `skills.md` in the same change.
-- Do not create duplicate prompt/guide files unless there is a strong runtime need. If one is added, it must point back to `skills.md` and avoid conflicting instructions.
+- Do not put analyst judgment into the MCP server. The MCP exposes data capabilities; `AGENT_SYSTEM_PROMPT.md` tells the agent when and why to use them.
+- When changing analysis behavior, chart choice, evidence standards, caveats, or response style, update `AGENT_SYSTEM_PROMPT.md` in the same change.
+- Keep tool-call mechanics in MCP tool descriptions, not in the agent system prompt.
+- Do not create duplicate prompt/guide files unless there is a strong runtime need. If one is added, it must point back to `AGENT_SYSTEM_PROMPT.md` and avoid conflicting instructions.
 - Do not add topic-specific report routes. Labour, CPI, trade, housing, energy, population, financial-market, and macro-comparison questions should use the same general workflow.
 - Prefer live public-source retrieval where practical. Do not add raw data mirrors unless there is a clear operational reason.
 - Keep custom Australian sources inside the same domestic catalogue and retrieval flow where possible.
@@ -47,7 +49,7 @@ user question -> AI-written FTS queries -> catalogue shortlist
 
 ## Before Merging MCP Changes
 
-- Confirm `README.md`, `AGENTS.md`, `skills.md`, and `.mcp.json` still describe the same architecture.
+- Confirm `README.md`, `AGENTS.md`, `AGENT_SYSTEM_PROMPT.md`, and `.mcp.json` still describe the same architecture.
 - Confirm the MCP tool descriptions match the implemented behavior.
 - Confirm no source-specific change bypasses the shortlist, inspect, retrieve, narrow, analyze pattern without a clear reason.
 - Run compile checks for touched Python modules.

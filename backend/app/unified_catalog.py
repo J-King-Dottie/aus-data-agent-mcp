@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import sqlite3
 import subprocess
@@ -74,7 +75,12 @@ def ensure_unified_catalog_artifacts(force_refresh: bool = False) -> None:
     needs_build = force_refresh or not CATALOG_PATH.exists() or not FTS_DB_PATH.exists()
     if not needs_build:
         return
-    subprocess.run([sys.executable, str(BUILD_SCRIPT_PATH)], cwd=str(ROOT), check=True)
+    env = os.environ.copy()
+    python_paths = [str(ROOT)]
+    if env.get("PYTHONPATH"):
+        python_paths.append(env["PYTHONPATH"])
+    env["PYTHONPATH"] = os.pathsep.join(python_paths)
+    subprocess.run([sys.executable, str(BUILD_SCRIPT_PATH)], cwd=str(ROOT), env=env, check=True)
     _invalidate_caches()
 
 

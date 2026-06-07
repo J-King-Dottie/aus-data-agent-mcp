@@ -1130,7 +1130,7 @@ def normalize_macro_retrieval_inputs(
 
 def detect_time_range(query: str) -> tuple[Optional[int], Optional[int]]:
     text = str(query or "")
-    current_year = datetime.utcnow().year
+    current_year = datetime.now(timezone.utc).year
 
     explicit = re.search(r"\b(19|20)\d{2}\s*(?:to|-|through|until)\s*(19|20)\d{2}\b", text, re.IGNORECASE)
     if explicit:
@@ -1745,6 +1745,7 @@ def _fetch_comtrade(
     all_series: Dict[tuple[str, str, str, str], Dict[str, Any]] = {}
     source_refs: List[Dict[str, Any]] = []
     last_request_url = ""
+    request_urls: List[str] = []
 
     for reporter_code in clean_reporters:
         for partner_code in clean_partners:
@@ -1766,6 +1767,7 @@ def _fetch_comtrade(
 
                     request_url = _request_url(base_url, params)
                     last_request_url = request_url
+                    request_urls.append(request_url)
                     logger.info(
                         'Macro retrieval request provider=comtrade reporters="%s" partners="%s" hs="%s" flow=%s frequency=%s url="%s"',
                         ",".join(clean_reporters),
@@ -1880,6 +1882,7 @@ def _fetch_comtrade(
         "concept_id": entry.concept_id,
         "concept_label": entry.concept_label,
         "api_request_url": last_request_url,
+        "api_request_urls": request_urls,
         "query_parameters": {
             "reporterCodes": clean_reporters,
             "partnerCodes": clean_partners,

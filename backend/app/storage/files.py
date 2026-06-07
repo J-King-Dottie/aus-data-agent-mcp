@@ -33,6 +33,9 @@ class ConversationState:
     active_run_artifact_count: int | None = None
     last_provider_route: str = ""
     last_provider_search_query: str = ""
+    user_id: str = ""
+    project_id: str = ""
+    project_name: str = ""
 
 
 class ConversationStore:
@@ -87,6 +90,9 @@ class ConversationStore:
             active_run_artifact_count=raw.get("active_run_artifact_count") if isinstance(raw.get("active_run_artifact_count"), int) else None,
             last_provider_route=str(raw.get("last_provider_route") or ""),
             last_provider_search_query=str(raw.get("last_provider_search_query") or ""),
+            user_id=str(raw.get("user_id") or ""),
+            project_id=str(raw.get("project_id") or ""),
+            project_name=str(raw.get("project_name") or ""),
         )
 
     def _save_to_disk(self, state: ConversationState) -> None:
@@ -114,6 +120,9 @@ class ConversationStore:
             "active_run_artifact_count": state.active_run_artifact_count,
             "last_provider_route": state.last_provider_route,
             "last_provider_search_query": state.last_provider_search_query,
+            "user_id": state.user_id,
+            "project_id": state.project_id,
+            "project_name": state.project_name,
         }
         path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 

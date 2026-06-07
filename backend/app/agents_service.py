@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from functools import lru_cache
 import json
 import logging
@@ -11,7 +12,7 @@ import shutil
 import sys
 import time
 from pathlib import Path
-from threading import Event, Lock
+from threading import Event, Lock, Thread
 from typing import Any, Callable, Dict, List, Optional
 
 from agents import (
@@ -33,7 +34,21 @@ from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font
 
 from .config import get_settings
+from .model_builder import (
+    fetch_model_builder_state,
+    update_model_assumptions_state,
+    update_model_builder_state,
+    update_model_graph_state,
+)
+from .project_memory import (
+    compact_project_memory_after_run,
+    fetch_project_chat_messages,
+    fetch_project_compact_memory,
+    persist_project_chat_run,
+    search_project_compact_memory,
+)
 from .storage import ConversationStore
+from .validated_variables import run_validated_variable_record, save_validated_variable_record
 
 
 settings = get_settings()
@@ -65,10 +80,43 @@ class AgentRuntimeContext:
     store: ConversationStore
     code_container_id: str
     status_callback: Callable[[str], None]
+    user_id: str = ""
+    project_id: str = ""
+    project_name: str = ""
+    project_compact_memory: Dict[str, Any] | None = None
 
 
 class ConversationCancelled(RuntimeError):
     """Raised when a conversation is cancelled mid-generation."""
+
+
+class NisabaProjectSession:
+    """Agents SDK session hydrated from Supabase-backed project chat history."""
+
+    def __init__(self, session_id: str, initial_items: Optional[List[Dict[str, Any]]] = None):
+        self.session_id = session_id
+        self._items = [copy.deepcopy(item) for item in list(initial_items or [])]
+        self._lock = asyncio.Lock()
+
+    async def get_items(self, limit: Optional[int] = None) -> List[Dict[str, Any]]:
+        async with self._lock:
+            if limit is None:
+                return copy.deepcopy(self._items)
+            return copy.deepcopy(self._items[-limit:])
+
+    async def add_items(self, items: List[Dict[str, Any]]) -> None:
+        async with self._lock:
+            self._items.extend(copy.deepcopy(item) for item in list(items or []))
+
+    async def pop_item(self) -> Optional[Dict[str, Any]]:
+        async with self._lock:
+            if not self._items:
+                return None
+            return self._items.pop()
+
+    async def clear_session(self) -> None:
+        async with self._lock:
+            self._items.clear()
 
 
 def _acquire_cancellation_event(conversation_id: str) -> Event:
@@ -159,6 +207,73 @@ def _session_items_from_state_messages(messages: List[Dict[str, Any]]) -> List[D
     return items
 
 
+def _agent_session_items_from_chat_history(
+    messages: List[Dict[str, Any]],
+    max_pairs: int = 5,
+    max_workflow_notes: int = 8,
+) -> List[Dict[str, Any]]:
+    collected: List[Dict[str, Any]] = []
+    workflow_notes: List[str] = []
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        role = str(message.get("role") or "").strip().lower()
+        content = str(message.get("content") or "").strip()
+        if not content:
+            continue
+        if role == "progress":
+            workflow_notes.append(_truncate(content, 240))
+            continue
+        if role not in {"user", "assistant"}:
+            continue
+        if collected and collected[-1].get("role") == role and collected[-1].get("content") == content:
+            continue
+        collected.append({"role": role, "content": content})
+
+    workflow_item = None
+    recent_workflow_notes = [note for note in workflow_notes[-max(0, max_workflow_notes):] if note]
+    if recent_workflow_notes:
+        workflow_item = {
+            "role": "assistant",
+            "content": (
+                "Recent workflow notes from earlier runs. Use these for high-level continuity only; "
+                "do not treat them as source evidence or raw data:\n- "
+                + "\n- ".join(recent_workflow_notes)
+            ),
+        }
+
+    if len(collected) <= 2:
+        return ([workflow_item] if workflow_item else []) + collected
+
+    pairs: List[List[tuple[int, Dict[str, Any]]]] = []
+    pending_user: tuple[int, Dict[str, Any]] | None = None
+    trailing_items: List[tuple[int, Dict[str, Any]]] = []
+    for index, item in enumerate(collected):
+        if item["role"] == "user":
+            if pending_user is not None:
+                trailing_items.append(pending_user)
+            pending_user = (index, item)
+            continue
+        if pending_user is not None:
+            pairs.append([pending_user, (index, item)])
+            pending_user = None
+        else:
+            trailing_items.append((index, item))
+
+    if pending_user is not None:
+        trailing_items.append(pending_user)
+
+    if pairs:
+        selected_pairs = pairs[-max(1, max_pairs):]
+        flattened = [entry for pair in selected_pairs for _, entry in pair]
+        if trailing_items:
+            last_pair_index = selected_pairs[-1][-1][0]
+            flattened.extend([item for idx, item in trailing_items if idx > last_pair_index][-2:])
+        return ([workflow_item] if workflow_item else []) + flattened
+
+    return ([workflow_item] if workflow_item else []) + collected[-max(2, max_pairs * 2):]
+
+
 async def clear_agent_session(conversation_id: str) -> None:
     await conversation_session(conversation_id).clear_session()
 
@@ -234,15 +349,11 @@ def _build_run_cost_payload(
     }
 
 
-SKILLS_PROMPT_PATH = PROJECT_ROOT / "skills.md"
-WEB_APP_PROMPT_PATH = PROJECT_ROOT / "WEB_APP.md"
+AGENT_SYSTEM_PROMPT_PATH = PROJECT_ROOT / "AGENT_SYSTEM_PROMPT.md"
 
 
 def _system_instructions() -> str:
-    return "\n\n".join(
-        path.read_text(encoding="utf-8").strip()
-        for path in (SKILLS_PROMPT_PATH, WEB_APP_PROMPT_PATH)
-    )
+    return AGENT_SYSTEM_PROMPT_PATH.read_text(encoding="utf-8").strip()
 
 
 @lru_cache(maxsize=1)
@@ -258,16 +369,259 @@ def _create_code_container(conversation_id: str) -> str:
     return str(container.id)
 
 
+def _build_agent_input(
+    user_input: str,
+    project_memory: Dict[str, Any] | None,
+    model_builder_state: Dict[str, Any] | None,
+) -> str:
+    memory_text = ""
+    updated_at = None
+    if isinstance(project_memory, dict):
+        memory_text = str(project_memory.get("memory_text") or "").strip()
+        updated_at = project_memory.get("updated_at")
+    context_payload: Dict[str, Any] = {}
+    if memory_text:
+        context_payload["project_compact_memory"] = {
+            "memory_text": memory_text,
+            "updated_at": updated_at.isoformat() if hasattr(updated_at, "isoformat") else updated_at,
+            "use": "Continuity only; not source evidence.",
+        }
+    if isinstance(model_builder_state, dict):
+        context_payload["project_model_builder"] = {
+            "state": model_builder_state,
+            "use": "Current active variables, assumptions, and graph. Follow the agent system prompt routing rules.",
+        }
+    if not context_payload:
+        return user_input
+    return json.dumps(
+        {
+            "user_message": user_input,
+            "project_context": context_payload,
+        },
+        ensure_ascii=False,
+    )
+
+
+def _schedule_project_memory_compaction(
+    *,
+    user_id: str,
+    project_id: str,
+    project_name: str,
+    conversation_id: str,
+    messages: List[Dict[str, Any]],
+) -> None:
+    if not user_id or not project_id:
+        return
+
+    def run() -> None:
+        try:
+            saved = compact_project_memory_after_run(
+                user_id=user_id,
+                project_id=project_id,
+                project_name=project_name,
+                conversation_id=conversation_id,
+                messages=messages,
+                model_name=settings.openai_model,
+                openai_api_key=settings.openai_api_key,
+            )
+            logger.info(
+                "Project memory compaction finished cid=%s project_id=%s saved=%s",
+                conversation_id,
+                project_id,
+                saved,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Project memory compaction failed cid=%s project_id=%s error=%s",
+                conversation_id,
+                project_id,
+                exc,
+            )
+
+    Thread(target=run, name=f"nisaba-memory-{conversation_id[:12]}", daemon=True).start()
+
+
 @function_tool
 def report_progress(
     ctx: RunContextWrapper[AgentRuntimeContext],
     message: str,
 ) -> Dict[str, Any]:
-    """Send a short user-facing progress update at a meaningful point in the workflow. Use one plain-English sentence. Keep the user oriented as you go, and send an extra update if you pivot because the data, slice, or source was not right."""
+    """Send one short user-facing progress update."""
     normalized = _truncate(message, 220)
     if normalized:
         ctx.context.status_callback(normalized)
     return {"ok": True, "message": normalized}
+
+
+@function_tool(strict_mode=False)
+def search_nisaba_project_memory(
+    ctx: RunContextWrapper[AgentRuntimeContext],
+    query: str,
+    limit: int = 5,
+) -> Dict[str, Any]:
+    """Search compact memories from the user's other Nisaba projects."""
+    context = ctx.context
+    results = search_project_compact_memory(
+        user_id=context.user_id,
+        current_project_id=context.project_id,
+        query=query,
+        limit=limit,
+    )
+    return {
+        "results": results,
+        "result_count": len(results),
+        "instruction": (
+            "Use these compact Nisaba memories only for continuity about prior chats, modelling choices, "
+            "user preferences, assumptions, unresolved tasks, or validated-variable intent. "
+            "Use MCP retrieval and public-source evidence for economic facts, data values, and citations."
+        ),
+    }
+
+
+@function_tool(strict_mode=False)
+def save_validated_variable(
+    ctx: RunContextWrapper[AgentRuntimeContext],
+    name: str,
+    label: str = "",
+    source_name: str = "",
+    provider_id: str = "",
+    dataset_id: str = "",
+    metric: str = "",
+    unit: str = "",
+    geography: str = "",
+    frequency: str = "",
+    seasonal_treatment: str = "",
+    period_start: str = "",
+    period_end: str = "",
+    validated_api_url: str = "",
+    retrieval_logic: Optional[Dict[str, Any]] = None,
+    transformation_logic: Optional[Dict[str, Any]] = None,
+    transform_summary: str = "",
+    recreation_summary: str = "",
+    evidence_artifact: Optional[Dict[str, Any]] = None,
+    external_key: str = "",
+) -> Dict[str, Any]:
+    """Save an approved metric as an active validated variable.
+
+    Include source identifiers, validated_api_url, executable retrieval/narrowing recipe,
+    transformation logic, validation metadata, and recreation_summary.
+    """
+    context = ctx.context
+    retrieval_logic = retrieval_logic or {}
+    evidence_artifact = evidence_artifact or {}
+    _assert_validated_variable_is_narrowed(context, retrieval_logic, evidence_artifact)
+    validated_api_url, validated_api_urls = _validated_api_urls_from_mcp_artifacts(
+        context=context,
+        current_url=validated_api_url,
+        dataset_id=dataset_id,
+        retrieval_logic=retrieval_logic,
+        evidence_artifact=evidence_artifact,
+    )
+    retrieval_logic = _stamp_validated_api_url_on_retrieve_steps(retrieval_logic, validated_api_url, validated_api_urls)
+    return save_validated_variable_record(
+        user_id=context.user_id,
+        project_id=context.project_id,
+        name=name,
+        label=label,
+        source_name=source_name,
+        provider_id=provider_id,
+        dataset_id=dataset_id,
+        metric=metric,
+        unit=unit,
+        geography=geography,
+        frequency=frequency,
+        seasonal_treatment=seasonal_treatment,
+        period_start=period_start,
+        period_end=period_end,
+        validated_api_url=validated_api_url,
+        retrieval_logic=retrieval_logic,
+        transformation_logic=transformation_logic or {},
+        transform_summary=transform_summary,
+        recreation_summary=recreation_summary,
+        evidence_artifact=evidence_artifact,
+        external_key=external_key,
+    )
+
+
+@function_tool(strict_mode=False)
+def run_validated_variable(
+    ctx: RunContextWrapper[AgentRuntimeContext],
+    variable_id: str = "",
+    external_key: str = "",
+    name: str = "",
+) -> Dict[str, Any]:
+    """Replay an active validated variable by id, external_key, or name."""
+    context = ctx.context
+    return run_validated_variable_record(
+        user_id=context.user_id,
+        project_id=context.project_id,
+        conversation_id=context.conversation_id,
+        code_container_id=context.code_container_id,
+        variable_id=variable_id,
+        external_key=external_key,
+        name=name,
+    )
+
+
+@function_tool(strict_mode=False)
+def update_model_builder(
+    ctx: RunContextWrapper[AgentRuntimeContext],
+    model_builder_state: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Replace the complete model-builder state: variables, assumptions, nodes, and edges."""
+    context = ctx.context
+    result = update_model_builder_state(
+        user_id=context.user_id,
+        project_id=context.project_id,
+        model_builder_state=model_builder_state,
+    )
+    return {
+        "updated": True,
+        **result,
+        "instruction": "The right-pane model builder state has been updated for this project.",
+    }
+
+
+@function_tool(strict_mode=False)
+def update_model_assumptions(
+    ctx: RunContextWrapper[AgentRuntimeContext],
+    assumptions: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Replace only the project's model assumptions."""
+    context = ctx.context
+    result = update_model_assumptions_state(
+        user_id=context.user_id,
+        project_id=context.project_id,
+        assumptions=assumptions,
+    )
+    return {
+        "updated": True,
+        **result,
+        "instruction": "The right-pane assumptions have been updated for this project.",
+    }
+
+
+@function_tool(strict_mode=False)
+def update_model_graph(
+    ctx: RunContextWrapper[AgentRuntimeContext],
+    nodes: List[Dict[str, Any]],
+    edges: List[Dict[str, Any]],
+    variables: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    """Replace only the model graph and, when supplied, active validated-variable links."""
+    context = ctx.context
+    result = update_model_graph_state(
+        user_id=context.user_id,
+        project_id=context.project_id,
+        variables=variables,
+        nodes=nodes,
+        edges=edges,
+    )
+    return {
+        "updated": True,
+        **result,
+        "instruction": "The right-pane model graph has been updated for this project.",
+    }
 
 
 _TRANSIENT_MODEL_STATUSES = {408, 409, 429, 500, 502, 503, 504}
@@ -321,6 +675,12 @@ def _build_agent(code_container_id: str) -> Agent[Any]:
         instructions=_system_instructions(),
         tools=[
             report_progress,
+            search_nisaba_project_memory,
+            save_validated_variable,
+            run_validated_variable,
+            update_model_builder,
+            update_model_assumptions,
+            update_model_graph,
             CodeInterpreterTool(
                 tool_config={
                     "type": "code_interpreter",
@@ -330,6 +690,8 @@ def _build_agent(code_container_id: str) -> Agent[Any]:
         ],
         model_settings=ModelSettings(
             reasoning={"effort": settings.openai_reasoning_effort},
+            include_usage=True,
+            parallel_tool_calls=False,
             retry=ModelRetrySettings(
                 max_retries=4,
                 policy=_model_retry_policy,
@@ -342,7 +704,7 @@ def _build_agent(code_container_id: str) -> Agent[Any]:
             ),
         ),
         mcp_config={
-            "convert_schemas_to_strict": True,
+            "convert_schemas_to_strict": False,
         },
     )
 
@@ -424,12 +786,6 @@ def _tool_args_summary(tool_args: Dict[str, Any]) -> Dict[str, Any]:
         if isinstance(value, list) and value:
             summary[key] = value[:6]
             if len(value) > 6:
-                summary[f"{key}_count"] = len(value)
-    for key in ("queries", "artifactIds", "requests"):
-        value = tool_args.get(key)
-        if isinstance(value, list) and value:
-            summary[key] = value[:3]
-            if len(value) > 3:
                 summary[f"{key}_count"] = len(value)
     return summary
 
@@ -546,6 +902,206 @@ def _artifact_payload_from_record(record: Dict[str, Any]) -> Any:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def _is_real_api_url(value: Any) -> bool:
+    text = str(value or "").strip()
+    if not text.startswith(("https://", "http://")) or "…" in text:
+        return False
+    return not (text.endswith("...") and not text.endswith("...."))
+
+
+def _artifact_ids_from_value(value: Any) -> List[str]:
+    ids: List[str] = []
+
+    def add(candidate: Any) -> None:
+        text = str(candidate or "").strip()
+        if text and not text.startswith("${") and text not in ids:
+            ids.append(text)
+
+    def walk(item: Any) -> None:
+        if isinstance(item, dict):
+            for key in ("artifact_id", "artifactId", "parent_artifact_id", "parentArtifactId"):
+                add(item.get(key))
+            for child in item.values():
+                walk(child)
+        elif isinstance(item, list):
+            for child in item:
+                walk(child)
+
+    walk(value)
+    return ids
+
+
+def _artifact_api_request_url(state: Any, record: Dict[str, Any]) -> str:
+    direct_url = str(record.get("api_request_url") or "").strip()
+    if _is_real_api_url(direct_url):
+        return direct_url
+    try:
+        payload = _artifact_payload_from_record(record)
+    except Exception:
+        payload = None
+    if isinstance(payload, dict):
+        payload_url = str(payload.get("api_request_url") or "").strip()
+        if _is_real_api_url(payload_url):
+            return payload_url
+        parent_artifact_id = str(payload.get("parent_artifact_id") or "").strip()
+        if parent_artifact_id:
+            parent_record = _artifact_record_by_id(state, parent_artifact_id)
+            if isinstance(parent_record, dict):
+                parent_url = _artifact_api_request_url(state, parent_record)
+                if parent_url:
+                    return parent_url
+    parent_artifact_id = str(record.get("parent_artifact_id") or "").strip()
+    if parent_artifact_id:
+        parent_record = _artifact_record_by_id(state, parent_artifact_id)
+        if isinstance(parent_record, dict):
+            return _artifact_api_request_url(state, parent_record)
+    return ""
+
+
+def _artifact_api_request_urls(state: Any, record: Dict[str, Any]) -> List[str]:
+    urls: List[str] = []
+
+    def add(value: Any) -> None:
+        text = str(value or "").strip()
+        if _is_real_api_url(text) and text not in urls:
+            urls.append(text)
+
+    for item in record.get("api_request_urls") if isinstance(record.get("api_request_urls"), list) else []:
+        add(item)
+    add(record.get("api_request_url"))
+    try:
+        payload = _artifact_payload_from_record(record)
+    except Exception:
+        payload = None
+    if isinstance(payload, dict):
+        for item in payload.get("api_request_urls") if isinstance(payload.get("api_request_urls"), list) else []:
+            add(item)
+        add(payload.get("api_request_url"))
+        parent_artifact_id = str(payload.get("parent_artifact_id") or "").strip()
+        if parent_artifact_id:
+            parent_record = _artifact_record_by_id(state, parent_artifact_id)
+            if isinstance(parent_record, dict):
+                for item in _artifact_api_request_urls(state, parent_record):
+                    add(item)
+    parent_artifact_id = str(record.get("parent_artifact_id") or "").strip()
+    if parent_artifact_id:
+        parent_record = _artifact_record_by_id(state, parent_artifact_id)
+        if isinstance(parent_record, dict):
+            for item in _artifact_api_request_urls(state, parent_record):
+                add(item)
+    return urls
+
+
+def _artifact_dataset_id(record: Dict[str, Any]) -> str:
+    try:
+        payload = _artifact_payload_from_record(record)
+    except Exception:
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    dataset = payload.get("dataset") if isinstance(payload.get("dataset"), dict) else {}
+    return str(dataset.get("id") or dataset.get("dataset_id") or payload.get("dataset_id") or "").strip()
+
+
+def _validated_api_urls_from_mcp_artifacts(
+    *,
+    context: AgentRuntimeContext,
+    current_url: str,
+    dataset_id: str,
+    retrieval_logic: Dict[str, Any],
+    evidence_artifact: Dict[str, Any],
+) -> tuple[str, List[str]]:
+    state = context.store.load(context.conversation_id)
+    for artifact_id in _artifact_ids_from_value(evidence_artifact) + _artifact_ids_from_value(retrieval_logic):
+        record = _artifact_record_by_id(state, artifact_id)
+        if isinstance(record, dict):
+            api_urls = _artifact_api_request_urls(state, record)
+            if api_urls:
+                return api_urls[0], api_urls
+
+    clean_dataset_id = str(dataset_id or "").strip()
+    if clean_dataset_id:
+        for record in reversed(list(getattr(state, "artifacts", []) or [])):
+            if not isinstance(record, dict):
+                continue
+            if _artifact_dataset_id(record) != clean_dataset_id:
+                continue
+            api_urls = _artifact_api_request_urls(state, record)
+            if api_urls:
+                return api_urls[0], api_urls
+
+    latest_record = _latest_artifact_record(state)
+    if isinstance(latest_record, dict):
+        api_urls = _artifact_api_request_urls(state, latest_record)
+        if api_urls:
+            return api_urls[0], api_urls
+
+    if _is_real_api_url(current_url):
+        url = str(current_url).strip()
+        return url, [url]
+    raise RuntimeError("Cannot save validated variable: the MCP retrieve artifact does not include a real api_request_url.")
+
+
+def _retrieval_logic_has_narrow_step(value: Any) -> bool:
+    if isinstance(value, dict):
+        if str(value.get("tool") or "").strip() == "narrow_artifact":
+            return True
+        return any(_retrieval_logic_has_narrow_step(item) for item in value.values())
+    if isinstance(value, list):
+        return any(_retrieval_logic_has_narrow_step(item) for item in value)
+    return False
+
+
+def _evidence_references_narrowed_artifact(
+    *,
+    context: AgentRuntimeContext,
+    evidence_artifact: Dict[str, Any],
+    retrieval_logic: Dict[str, Any],
+) -> bool:
+    state = context.store.load(context.conversation_id)
+    for artifact_id in _artifact_ids_from_value(evidence_artifact) + _artifact_ids_from_value(retrieval_logic):
+        record = _artifact_record_by_id(state, artifact_id)
+        if isinstance(record, dict) and "narrowed" in str(record.get("kind") or "").strip():
+            return True
+    return False
+
+
+def _assert_validated_variable_is_narrowed(
+    context: AgentRuntimeContext,
+    retrieval_logic: Dict[str, Any],
+    evidence_artifact: Dict[str, Any],
+) -> None:
+    if _retrieval_logic_has_narrow_step(retrieval_logic) or _evidence_references_narrowed_artifact(
+        context=context,
+        evidence_artifact=evidence_artifact,
+        retrieval_logic=retrieval_logic,
+    ):
+        return
+    raise RuntimeError(
+        "Cannot save validated variable from a raw retrieval-only recipe. "
+        "Run inspect_artifact, then narrow_artifact to the exact metric/geography/frequency/treatment/period, "
+        "and save the validated variable using that narrowed artifact and narrow_artifact step."
+    )
+
+
+def _stamp_validated_api_url_on_retrieve_steps(retrieval_logic: Dict[str, Any], api_url: str, api_urls: List[str]) -> Dict[str, Any]:
+    stamped = json.loads(json.dumps(retrieval_logic or {}, ensure_ascii=False))
+    if isinstance(stamped.get("steps"), list):
+        for step in stamped["steps"]:
+            if isinstance(step, dict) and str(step.get("tool") or "").strip() == "retrieve":
+                step["validated_api_url"] = api_url
+                step["validated_api_urls"] = api_urls
+        return stamped
+    if isinstance(stamped.get("api_call"), dict):
+        stamped["api_call"]["validated_api_url"] = api_url
+        stamped["api_call"]["validated_api_urls"] = api_urls
+        return stamped
+    if str(stamped.get("tool") or "").strip() == "retrieve":
+        stamped["validated_api_url"] = api_url
+        stamped["validated_api_urls"] = api_urls
+    return stamped
+
+
 def _domestic_preview_rows(payload: Dict[str, Any], limit: int = 8) -> List[Dict[str, Any]]:
     headers, rows = _flatten_domestic_payload(payload)
     preview: List[Dict[str, Any]] = []
@@ -597,9 +1153,10 @@ def _artifact_manifest_summary(record: Dict[str, Any], payload: Dict[str, Any]) 
                 "series_count": len(series_items),
                 "observation_count": observation_count,
                 "dimensions": dimension_values,
-                "preview_rows": _domestic_preview_rows(payload),
             }
         )
+        if kind.endswith("_narrowed"):
+            summary["preview_rows"] = _domestic_preview_rows(payload)
     elif kind.startswith("macro"):
         series_items = payload.get("series") if isinstance(payload.get("series"), list) else []
         point_count = 0
@@ -622,9 +1179,10 @@ def _artifact_manifest_summary(record: Dict[str, Any], payload: Dict[str, Any]) 
                 "point_count": point_count,
                 "countries": countries,
                 "frequencies": frequencies,
-                "preview_rows": _macro_preview_rows(payload),
             }
         )
+        if kind.endswith("_narrowed"):
+            summary["preview_rows"] = _macro_preview_rows(payload)
     parent_artifact_id = str(record.get("parent_artifact_id") or "").strip()
     if parent_artifact_id:
         summary["parent_artifact_id"] = parent_artifact_id
@@ -873,7 +1431,7 @@ def _tool_transport(tool_name: str, item: Any) -> str:
 def _append_trace_event(conversation_id: str, payload: Dict[str, Any]) -> None:
     path = _trace_file_path(conversation_id)
     path.parent.mkdir(parents=True, exist_ok=True)
-    entry = {"ts": datetime.utcnow().isoformat(timespec="milliseconds") + "Z", **payload}
+    entry = {"ts": datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z"), **payload}
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(entry, ensure_ascii=False, sort_keys=True) + "\n")
 
@@ -934,6 +1492,24 @@ def _persist_retrieval_artifact(
         parent_artifact_id = str(payload.get("parent_artifact_id") or "").strip()
         if parent_artifact_id:
             record["parent_artifact_id"] = parent_artifact_id
+        api_request_url = str(payload.get("api_request_url") or "").strip()
+        if not api_request_url and parent_artifact_id:
+            parent_record = _artifact_record_by_id(state, parent_artifact_id)
+            if isinstance(parent_record, dict):
+                api_request_url = str(parent_record.get("api_request_url") or "").strip()
+        if api_request_url:
+            record["api_request_url"] = api_request_url
+        api_request_urls = [
+            str(item or "").strip()
+            for item in (payload.get("api_request_urls") if isinstance(payload.get("api_request_urls"), list) else [])
+            if str(item or "").strip()
+        ]
+        if not api_request_urls and parent_artifact_id:
+            parent_record = _artifact_record_by_id(state, parent_artifact_id)
+            if isinstance(parent_record, dict) and isinstance(parent_record.get("api_request_urls"), list):
+                api_request_urls = [str(item or "").strip() for item in parent_record["api_request_urls"] if str(item or "").strip()]
+        if api_request_urls:
+            record["api_request_urls"] = api_request_urls
         for key in ("analysis_container_id", "analysis_file_id", "analysis_filename", "analysis_local_path"):
             value = str(payload.get(key) or "").strip()
             if value:
@@ -945,7 +1521,7 @@ def _persist_retrieval_artifact(
         label = str(dataset.get("name") or dataset.get("id") or "Domestic dataset").strip()
         artifact_path = run_dir / "artifacts" / f"domestic_retrieve_{len(state.artifacts) + 1:03d}.json"
         _write_json(artifact_path, payload)
-        return _make_artifact_record(
+        record = _make_artifact_record(
             state=state,
             path=artifact_path,
             kind="domestic_retrieve",
@@ -953,6 +1529,19 @@ def _persist_retrieval_artifact(
             summary=_truncate(f"Retrieved domestic dataset '{label}'.", 300),
             source_references=payload.get("source_references") if isinstance(payload.get("source_references"), list) else None,
         )
+        api_request_url = str(payload.get("api_request_url") or "").strip()
+        if api_request_url:
+            record["api_request_url"] = api_request_url
+        api_request_urls = [
+            str(item or "").strip()
+            for item in (payload.get("api_request_urls") if isinstance(payload.get("api_request_urls"), list) else [])
+            if str(item or "").strip()
+        ]
+        if api_request_urls:
+            record["api_request_urls"] = api_request_urls
+        elif api_request_url:
+            record["api_request_urls"] = [api_request_url]
+        return record
 
     if _looks_like_macro_result(payload):
         selected = payload.get("selected_indicator") if isinstance(payload.get("selected_indicator"), dict) else {}
@@ -964,7 +1553,7 @@ def _persist_retrieval_artifact(
         ).strip()
         artifact_path = run_dir / "artifacts" / f"macro_retrieve_{len(state.artifacts) + 1:03d}.json"
         _write_json(artifact_path, payload)
-        return _make_artifact_record(
+        record = _make_artifact_record(
             state=state,
             path=artifact_path,
             kind="macro_retrieve",
@@ -972,6 +1561,19 @@ def _persist_retrieval_artifact(
             summary=_truncate(f"Retrieved macro dataset '{label}'.", 300),
             source_references=payload.get("source_references") if isinstance(payload.get("source_references"), list) else None,
         )
+        api_request_url = str(payload.get("api_request_url") or "").strip()
+        if api_request_url:
+            record["api_request_url"] = api_request_url
+        api_request_urls = [
+            str(item or "").strip()
+            for item in (payload.get("api_request_urls") if isinstance(payload.get("api_request_urls"), list) else [])
+            if str(item or "").strip()
+        ]
+        if api_request_urls:
+            record["api_request_urls"] = api_request_urls
+        elif api_request_url:
+            record["api_request_urls"] = [api_request_url]
+        return record
 
     return None
 
@@ -1358,7 +1960,7 @@ def _build_answer_export(
     sheet.title = "Summary"
     sheet.append(["Summary"])
     sheet.append(["Question", user_message])
-    sheet.append(["Generated", datetime.utcnow().strftime("%Y-%m-%d %H:%M:%SZ")])
+    sheet.append(["Generated", datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ")])
 
     source_lines: List[str] = []
     seen_sources: set[str] = set()
@@ -1453,10 +2055,22 @@ async def _generate_response_async(
     user_input: str,
     store: ConversationStore,
     status_callback: Callable[[str], None],
+    user_id: str = "",
+    project_id: str = "",
+    project_name: str = "",
 ) -> str:
     set_default_openai_key(settings.openai_api_key, use_for_tracing=False)
     cancel_event = _acquire_cancellation_event(conversation_id)
     state = store.load(conversation_id)
+    resolved_user_id = user_id or str(getattr(state, "user_id", "") or "")
+    resolved_project_id = project_id or str(getattr(state, "project_id", "") or "")
+    resolved_project_name = project_name or str(getattr(state, "project_name", "") or "")
+    if resolved_user_id and resolved_project_id:
+        state.messages = fetch_project_chat_messages(
+            user_id=resolved_user_id,
+            project_id=resolved_project_id,
+            conversation_id=conversation_id,
+        )
     run_dir = _ensure_runtime_dirs(conversation_id)
     run_artifact_start_index = len(state.artifacts)
     processed_tool_output_call_ids: set[str] = set()
@@ -1488,8 +2102,25 @@ async def _generate_response_async(
     state.latest_export_artifact_id = ""
     state.latest_export_request = None
     state.latest_export_status = ""
+    if user_id:
+        state.user_id = user_id
+    if project_id:
+        state.project_id = project_id
+    if project_name:
+        state.project_name = project_name
     store.save(state)
-    session = conversation_session(conversation_id)
+    session = NisabaProjectSession(
+        conversation_id,
+        _agent_session_items_from_chat_history(state.messages),
+    )
+    project_compact_memory = fetch_project_compact_memory(
+        user_id=resolved_user_id,
+        project_id=resolved_project_id,
+    )
+    model_builder_state = fetch_model_builder_state(
+        user_id=resolved_user_id,
+        project_id=resolved_project_id,
+    )
 
     code_container_id = _create_code_container(conversation_id)
     _append_trace_event(
@@ -1508,30 +2139,30 @@ async def _generate_response_async(
         store=store,
         code_container_id=code_container_id,
         status_callback=emit_status,
+        user_id=resolved_user_id,
+        project_id=resolved_project_id,
+        project_name=resolved_project_name,
+        project_compact_memory=project_compact_memory,
     )
 
     _ensure_not_cancelled(conversation_id, cancel_event, "before_run")
 
     try:
         async with integrated_server:
-            result = Runner.run_streamed(
+            result = await Runner.run(
                 agent,
-                user_input,
+                input=_build_agent_input(user_input, project_compact_memory, model_builder_state),
                 context=runtime_context,
                 session=session,
-                max_turns=20,
+                max_turns=30,
             )
 
-            async for event in result.stream_events():
-                if cancel_event.is_set():
-                    result.cancel(mode="after_turn")
-                if getattr(event, "type", "") != "run_item_stream_event":
-                    continue
-
-                item = getattr(event, "item", None)
-                event_name = str(getattr(event, "name", "") or "").strip()
-                if event_name in {"tool_search_called", "tool_search_output_created"}:
+            for item in list(getattr(result, "new_items", []) or []):
+                _ensure_not_cancelled(conversation_id, cancel_event, "after_run_item")
+                item_type = str(getattr(item, "type", "") or "").strip()
+                if item_type in {"tool_search_call_item", "tool_search_output_item"}:
                     payload_preview = _event_payload_preview(_extract_raw_item(item))
+                    event_name = "tool_search_called" if item_type == "tool_search_call_item" else "tool_search_output_created"
                     logger.info(
                         "Tool search event cid=%s event=%s payload=%s",
                         conversation_id,
@@ -1547,7 +2178,7 @@ async def _generate_response_async(
                     )
                     continue
 
-                if event_name == "tool_called":
+                if item_type == "tool_call_item":
                     tool_name = _extract_tool_name(item)
                     call_id = _extract_call_id(item)
                     tool_args = _extract_tool_arguments(item)
@@ -1587,7 +2218,7 @@ async def _generate_response_async(
                     )
                     continue
 
-                if event_name != "tool_output":
+                if item_type != "tool_call_output_item":
                     continue
 
                 call_id = _extract_call_id(item)
@@ -1678,14 +2309,20 @@ async def _generate_response_async(
                 if call_id:
                     processed_tool_output_call_ids.add(call_id)
 
-            _ensure_not_cancelled(conversation_id, cancel_event, "after_stream")
+            _ensure_not_cancelled(conversation_id, cancel_event, "after_run")
             final_answer = str(result.final_output or "").strip()
             usage = getattr(getattr(result, "context_wrapper", None), "usage", None)
     finally:
         _release_cancellation_event(conversation_id)
 
     if not final_answer:
-        raise RuntimeError("The agent returned an empty response.")
+        if saved_progress_messages:
+            final_answer = (
+                "I completed part of the request, but I could not finish the final synthesis cleanly. "
+                "What I completed: " + "; ".join(saved_progress_messages[-5:])
+            )
+        else:
+            final_answer = "I started the request but could not complete a reliable final answer from the available run state."
 
     _append_trace_event(
         conversation_id,
@@ -1710,6 +2347,23 @@ async def _generate_response_async(
     for progress_message in saved_progress_messages:
         state.messages.append({"role": "progress", "content": progress_message})
     state.messages.append({"role": "assistant", "content": final_answer, "run_cost": run_cost})
+    persisted_chat = persist_project_chat_run(
+        user_id=resolved_user_id,
+        project_id=resolved_project_id,
+        conversation_id=conversation_id,
+        user_message=user_input,
+        progress_notes=saved_progress_messages,
+        final_response=final_answer,
+        run_cost=run_cost,
+    )
+    if persisted_chat:
+        _append_trace_event(
+            conversation_id,
+            {
+                "event": "supabase_chat_history_persisted",
+                "project_id": resolved_project_id,
+            },
+        )
     has_exportable_artifacts = len(state.artifacts) > run_artifact_start_index
     has_chart = _parse_chart_spec_from_markdown(final_answer) is not None
     if has_exportable_artifacts or has_chart:
@@ -1723,6 +2377,13 @@ async def _generate_response_async(
         state.latest_export_status = ""
         state.latest_export_request = None
     store.save(state)
+    _schedule_project_memory_compaction(
+        user_id=resolved_user_id,
+        project_id=resolved_project_id,
+        project_name=resolved_project_name,
+        conversation_id=conversation_id,
+        messages=list(state.messages),
+    )
     return final_answer
 
 
@@ -1731,6 +2392,9 @@ def generate_response(
     user_input: str,
     store: ConversationStore,
     status_callback: Callable[[str], None],
+    user_id: str = "",
+    project_id: str = "",
+    project_name: str = "",
 ) -> str:
     return asyncio.run(
         _generate_response_async(
@@ -1738,5 +2402,8 @@ def generate_response(
             user_input=user_input,
             store=store,
             status_callback=status_callback,
+            user_id=user_id,
+            project_id=project_id,
+            project_name=project_name,
         )
     )

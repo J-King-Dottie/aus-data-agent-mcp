@@ -26,6 +26,8 @@ frontend/dist/
 # Runtime / local state
 runtime/
 .codex
+.agents/
+skills-lock.json
 *.log
 *.sqlite3
 *.tsbuildinfo

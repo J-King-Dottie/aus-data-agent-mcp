@@ -29,12 +29,16 @@ from .agents_service import (
     reset_conversation_runtime,
     sync_agent_session_from_state,
 )
+from .model_builder import fetch_model_builder_state
 from .storage import ConversationStore
 
 
 class ChatRequest(BaseModel):
     conversation_id: str = Field(..., description="Stable identifier for the chat session.")
     message: str = Field(..., description="The user's natural language query.")
+    project_id: str = Field("", description="Supabase modelling project id for cross-run memory.")
+    user_id: str = Field("", description="Supabase user id for cross-run memory.")
+    project_name: str = Field("", description="Readable project name for compact memory search results.")
 
 
 class ResetRequest(BaseModel):
@@ -57,14 +61,18 @@ class ConversationSnapshot(BaseModel):
     run_status: str
     latest_progress: str
     latest_error: str
+    task_id: str = ""
+    final_response: str = ""
     pending_user_message: str = ""
     pending_user_mode: str = ""
     latest_export_url: str = ""
     latest_export_status: str = ""
+    model_builder_state: dict[str, object] | None = None
 
 
 class ChatAcceptedResponse(BaseModel):
     conversation_id: str
+    task_id: str
     run_status: str
     latest_progress: str
 
@@ -206,20 +214,48 @@ def _filtered_messages(state) -> list[dict[str, str]]:
     ]
 
 
+def _latest_assistant_response(state) -> str:
+    for message in reversed(list(state.messages or [])):
+        if not isinstance(message, dict):
+            continue
+        role = str(message.get("role") or "").strip().lower()
+        content = str(message.get("content") or "").strip()
+        if role == "assistant" and content:
+            return content
+    return ""
+
+
 def _snapshot_from_state(state) -> ConversationSnapshot:
     export_url = ""
     if get_latest_export_artifact_path(state):
         export_url = f"/api/conversation/{state.conversation_id}/latest-export"
+    run_status = str(state.run_status or "idle")
+    model_builder_state = None
+    user_id = str(getattr(state, "user_id", "") or "").strip()
+    project_id = str(getattr(state, "project_id", "") or "").strip()
+    if user_id and project_id:
+        try:
+            model_builder_state = fetch_model_builder_state(user_id=user_id, project_id=project_id)
+        except Exception as exc:
+            logger.warning(
+                "Failed to load model builder state cid=%s project_id=%s error=%s",
+                state.conversation_id,
+                project_id,
+                exc,
+            )
     return ConversationSnapshot(
         conversation_id=state.conversation_id,
         messages=_filtered_messages(state),
-        run_status=str(state.run_status or "idle"),
+        run_status=run_status,
         latest_progress=str(state.latest_progress or ""),
         latest_error=str(state.latest_error or ""),
+        task_id=str(state.active_run_id or ""),
+        final_response=_latest_assistant_response(state),
         pending_user_message=str(getattr(state, "pending_user_message", "") or ""),
         pending_user_mode=str(getattr(state, "pending_user_mode", "") or ""),
         latest_export_url=export_url,
         latest_export_status=str(getattr(state, "latest_export_status", "") or ""),
+        model_builder_state=model_builder_state,
     )
 
 
@@ -262,6 +298,9 @@ async def _run_generation_job(
     conversation_id: str,
     user_input: str,
     run_id: str,
+    user_id: str = "",
+    project_id: str = "",
+    project_name: str = "",
 ) -> None:
     def emit_status(message: str) -> None:
         state = store.load(conversation_id)
@@ -281,6 +320,9 @@ async def _run_generation_job(
             user_input,
             store,
             emit_status,
+            user_id,
+            project_id,
+            project_name,
         )
     except ConversationCancelled:
         _emit_runtime_log(f"Conversation cancelled mid-generation cid={conversation_id}")
@@ -291,7 +333,6 @@ async def _run_generation_job(
             state.run_status = "cancelled"
             state.latest_progress = ""
             state.latest_error = "Conversation cancelled by user."
-            state.active_run_id = None
             store.save(state)
             await sync_agent_session_from_state(conversation_id, state)
     except Exception as exc:
@@ -308,7 +349,6 @@ async def _run_generation_job(
             state.run_status = "failed"
             state.latest_progress = ""
             state.latest_error = str(exc)
-            state.active_run_id = None
             state.active_run_message_count = None
             state.active_run_loop_count = None
             state.active_run_artifact_count = None
@@ -333,7 +373,6 @@ async def _run_generation_job(
             state.run_status = "completed"
             state.latest_progress = ""
             state.latest_error = ""
-            state.active_run_id = None
             state.active_run_message_count = None
             state.active_run_loop_count = None
             state.active_run_artifact_count = None
@@ -379,6 +418,7 @@ async def chat(request: ChatRequest):
     if state.run_status == "processing":
         return ChatAcceptedResponse(
             conversation_id=request.conversation_id,
+            task_id=str(state.active_run_id or ""),
             run_status="processing",
             latest_progress=str(state.latest_progress or ""),
         )
@@ -391,6 +431,9 @@ async def chat(request: ChatRequest):
     state.active_run_message_count = len(state.messages)
     state.active_run_loop_count = len(state.loop_history)
     state.active_run_artifact_count = len(state.artifacts)
+    state.user_id = request.user_id.strip()
+    state.project_id = request.project_id.strip()
+    state.project_name = request.project_name.strip()
     store.save(state)
 
     task = asyncio.create_task(
@@ -398,15 +441,43 @@ async def chat(request: ChatRequest):
             conversation_id=request.conversation_id,
             user_input=user_input,
             run_id=run_id,
+            user_id=request.user_id.strip(),
+            project_id=request.project_id.strip(),
+            project_name=request.project_name.strip(),
         )
     )
     _RUN_TASKS[request.conversation_id] = task
 
     return ChatAcceptedResponse(
         conversation_id=request.conversation_id,
+        task_id=run_id,
         run_status="processing",
         latest_progress=state.latest_progress or "",
     )
+
+
+@app.get("/api/chat/task-status/{conversation_id}/{task_id}", response_model=ConversationSnapshot)
+async def get_chat_task_status(conversation_id: str, task_id: str):
+    state = store.load(conversation_id)
+    clean_task_id = task_id.strip()
+    active_run_id = str(state.active_run_id or "").strip()
+    if not clean_task_id or clean_task_id != active_run_id:
+        raise HTTPException(status_code=404, detail="Task not found.")
+    if state.run_status == "processing" and conversation_id not in _RUN_TASKS:
+        if _latest_assistant_response(state):
+            state.run_status = "completed"
+            state.latest_progress = ""
+            state.latest_error = ""
+        else:
+            state.run_status = "failed"
+            state.latest_progress = ""
+            state.latest_error = "The background run was interrupted before completion."
+        state.active_run_message_count = None
+        state.active_run_loop_count = None
+        state.active_run_artifact_count = None
+        store.save(state)
+        await sync_agent_session_from_state(conversation_id, state)
+    return _snapshot_from_state(state)
 
 
 @app.get("/api/conversation/{conversation_id}", response_model=ConversationSnapshot)

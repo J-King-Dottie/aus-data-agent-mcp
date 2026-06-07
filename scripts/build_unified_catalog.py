@@ -5,11 +5,18 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List
 
 import httpx
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parents[1]
+for import_path in (ROOT, SCRIPT_DIR):
+    if str(import_path) not in sys.path:
+        sys.path.insert(0, str(import_path))
 
 from backend.app.domestic_data import get_domestic_service
 from build_macro_catalog import (
@@ -22,7 +29,6 @@ from build_macro_catalog import (
 )
 
 
-ROOT = Path(__file__).resolve().parents[1]
 MANUAL_SOURCE_DEFINITIONS_PATH = ROOT / "MANUAL_SOURCE_DEFINITIONS.json"
 CATALOG_ENRICHMENTS_PATH = ROOT / "CATALOG_ENRICHMENTS.json"
 OUTPUT_PATH = ROOT / "UNIFIED_CATALOG_FULL.json"

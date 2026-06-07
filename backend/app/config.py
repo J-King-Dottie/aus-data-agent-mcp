@@ -19,6 +19,7 @@ class Settings(BaseModel):
     openai_api_key: str
     openai_model: str = "gpt-5.4"
     openai_reasoning_effort: str = "low"
+    database_url: str | None = None
     abs_api_base: str = "https://data.api.abs.gov.au"
     worldbank_base_url: str = "https://api.worldbank.org/v2"
     imf_base_url: str = "https://www.imf.org/external/datamapper/api/v1"
@@ -50,6 +51,10 @@ def get_settings() -> Settings:
     openai_reasoning_effort = os.getenv("OPENAI_REASONING_EFFORT")
     if openai_reasoning_effort:
         overrides["openai_reasoning_effort"] = openai_reasoning_effort
+
+    database_url = os.getenv("DATABASE_URL")
+    if database_url:
+        overrides["database_url"] = database_url
 
     node_binary = os.getenv("NODE_BINARY")
     if node_binary:

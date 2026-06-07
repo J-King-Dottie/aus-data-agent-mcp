@@ -14,15 +14,15 @@ question -> AI-written FTS queries over the unified catalog
 -> retrieve source data -> inspect/narrow artifacts -> analyze
 ```
 
-The MCP does data discovery and retrieval. Analyst behavior lives in [skills.md](skills.md), and development guardrails live in [AGENTS.md](AGENTS.md).
+The MCP does data discovery and retrieval. Agent behaviour lives in [AGENT_SYSTEM_PROMPT.md](AGENT_SYSTEM_PROMPT.md), and development guardrails live in [AGENTS.md](AGENTS.md).
 
 ## For AI Agents
 
 Start with these files:
 
-- [skills.md](skills.md): how to use the MCP as a careful economic/statistical analyst.
+- [AGENT_SYSTEM_PROMPT.md](AGENT_SYSTEM_PROMPT.md): the agent system prompt for careful economic/statistical analysis.
 - [AGENTS.md](AGENTS.md): project architecture and development rules.
-- [backend/app/unified_mcp_server.py](backend/app/unified_mcp_server.py): MCP tool surface.
+- [backend/app/unified_mcp_server.py](backend/app/unified_mcp_server.py): MCP tool surface and tool descriptions.
 - [.mcp.json](.mcp.json): project-scoped MCP config.
 - [UNIFIED_CATALOG_FULL.json](UNIFIED_CATALOG_FULL.json): checked-in unified catalog snapshot.
 
@@ -108,7 +108,14 @@ python3 scripts/build_comtrade_metadata.py
 
 ## App Layer
 
-The repo still includes the app code in `frontend/` and the supporting backend code in `backend/`. The app is being developed as an interface over the MCP/retrieval stack, but the public-ready surface for agents is currently the MCP plus the analyst instructions.
+The repo still includes the app code in `frontend/` and the supporting backend code in `backend/`. The app is being developed as an interface over the MCP/retrieval stack, but the public-ready surface for agents is currently the MCP plus the agent system prompt.
+
+The web app is evolving into an AI-assisted economic modelling workspace:
+
+- Left pane: modelling projects and project switching.
+- Centre pane: AI workspace for question definition, discovery, variable construction, model execution, and results.
+- Right pane: compact model builder showing validated variables, assumptions, and mathematical links.
+- Supabase schema: [supabase_modelling_workspace.sql](supabase_modelling_workspace.sql) creates projects, chat history, validated variables, assumptions, model graph, runs, run joins, and export records.
 
 - Frontend dev server: `http://127.0.0.1:3000`
 - Backend: `http://127.0.0.1:5000`
@@ -118,6 +125,12 @@ Daily local development from PowerShell with WSL:
 ```powershell
 wsl bash -lc "cd /home/projects/abs-mcp && ./start-backend-wsl.sh"
 wsl bash -lc "cd /home/projects/abs-mcp/frontend && npm run dev -- --host 127.0.0.1 --port 3000"
+```
+
+To open two visible terminal windows, one for the frontend and one for the backend, both with auto-reload:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\start-visible-dev.ps1 -SkipInstall
 ```
 
 ## Smoke Checks

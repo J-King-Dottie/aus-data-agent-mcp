@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import csv
-from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 import logging
 import os
@@ -9,7 +8,7 @@ import re
 import sqlite3
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from io import StringIO
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -51,13 +50,19 @@ RUNTIME_DIR = Path(os.getenv("NISABA_RUNTIME_DIR") or PROJECT_ROOT / "runtime")
 CONVERSATION_ID = str(os.getenv("NISABA_CONVERSATION_ID") or "standalone").strip() or "standalone"
 CODE_CONTAINER_ID = str(os.getenv("NISABA_CODE_CONTAINER_ID") or "").strip()
 OPENAI_API_KEY = str(os.getenv("OPENAI_API_KEY") or "").strip()
-MAX_ANALYSIS_UPLOAD_BYTES = 50 * 1024 * 1024
+MAX_ANALYSIS_UPLOAD_BYTES = 5 * 1024 * 1024
 MAX_NARROW_ATTEMPTS_PER_ROOT_ARTIFACT = 3
-SKILLS_PROMPT_PATH = PROJECT_ROOT / "skills.md"
+
+
+def _utc_timestamp() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
 def _mcp_instructions() -> str:
-    return SKILLS_PROMPT_PATH.read_text(encoding="utf-8").strip()
+    return (
+        "AusData MCP exposes public-data tools for catalog search, metadata inspection, "
+        "retrieval, artifact inspection, and artifact narrowing. Tool descriptions define call shapes."
+    )
 
 
 def _cid_prefix() -> str:
@@ -118,7 +123,7 @@ def _begin_tool_attempt(tool_name: str, scope: str, request: Dict[str, Any]) -> 
         "request": request,
         "status": "in_progress",
         "attempt_number": attempt_number,
-        "started_at": datetime.utcnow().isoformat(timespec="milliseconds") + "Z",
+        "started_at": _utc_timestamp(),
     }
     attempts.append(attempt_record)
     scope_state["attempts"] = attempts
@@ -146,7 +151,7 @@ def _finish_tool_attempt_success(context: Dict[str, Any], result_summary: Option
     for attempt in reversed(attempts):
         if isinstance(attempt, dict) and _clean_text(attempt.get("fingerprint")) == fingerprint and _clean_text(attempt.get("status")) == "in_progress":
             attempt["status"] = "success"
-            attempt["finished_at"] = datetime.utcnow().isoformat(timespec="milliseconds") + "Z"
+            attempt["finished_at"] = _utc_timestamp()
             if result_summary is not None:
                 attempt["result_summary"] = result_summary
             break
@@ -166,7 +171,7 @@ def _finish_tool_attempt_failure(context: Dict[str, Any], error_text: str) -> No
     for attempt in reversed(attempts):
         if isinstance(attempt, dict) and _clean_text(attempt.get("fingerprint")) == fingerprint and _clean_text(attempt.get("status")) == "in_progress":
             attempt["status"] = "failed"
-            attempt["finished_at"] = datetime.utcnow().isoformat(timespec="milliseconds") + "Z"
+            attempt["finished_at"] = _utc_timestamp()
             attempt["error"] = _clean_text(error_text) or "tool call failed"
             break
     _save_tool_attempt_state(state)
@@ -559,11 +564,19 @@ def _validate_anchor_wildcard_data_key(dataset_id: str, data_key: str) -> None:
 def _store_domestic_artifact(payload: Dict[str, Any], label: str) -> Dict[str, Any]:
     artifact_id = f"raw-domestic-{uuid4()}"
     _store_artifact(payload, artifact_id)
+    api_request_url = _clean_text(payload.get("api_request_url"))
+    api_request_urls = [
+        _clean_text(item)
+        for item in (payload.get("api_request_urls") if isinstance(payload.get("api_request_urls"), list) else [])
+        if _clean_text(item)
+    ]
     return {
         "artifact_id": artifact_id,
         "kind": "domestic_retrieve",
         "label": label,
         "summary": f"Stored domestic retrieval artifact for {label}. Inspect it before analysis.",
+        "api_request_url": api_request_url,
+        "api_request_urls": api_request_urls or ([api_request_url] if api_request_url else []),
         "source_references": payload.get("source_references") if isinstance(payload.get("source_references"), list) else [],
         "manifest": _summary(payload),
     }
@@ -572,11 +585,19 @@ def _store_domestic_artifact(payload: Dict[str, Any], label: str) -> Dict[str, A
 def _store_macro_artifact(payload: Dict[str, Any], label: str) -> Dict[str, Any]:
     artifact_id = f"raw-macro-{uuid4()}"
     _store_artifact(payload, artifact_id)
+    api_request_url = _clean_text(payload.get("api_request_url"))
+    api_request_urls = [
+        _clean_text(item)
+        for item in (payload.get("api_request_urls") if isinstance(payload.get("api_request_urls"), list) else [])
+        if _clean_text(item)
+    ]
     return {
         "artifact_id": artifact_id,
         "kind": "macro_retrieve",
         "label": label,
         "summary": f"Stored macro retrieval artifact for {label}. Inspect it before analysis.",
+        "api_request_url": api_request_url,
+        "api_request_urls": api_request_urls or ([api_request_url] if api_request_url else []),
         "source_references": payload.get("source_references") if isinstance(payload.get("source_references"), list) else [],
         "manifest": _summary(payload),
     }
@@ -601,6 +622,13 @@ def _summary(payload: Any) -> Dict[str, Any]:
         provider = payload.get("provider") or payload.get("provider_key")
         if provider:
             summary["provider"] = _clean_text(provider)
+        if payload.get("api_request_url"):
+            summary["api_request_url"] = _clean_text(payload.get("api_request_url"))
+        if isinstance(payload.get("api_request_urls"), list):
+            urls = [_clean_text(item) for item in payload.get("api_request_urls") if _clean_text(item)]
+            if urls:
+                summary["api_request_urls"] = urls[:5]
+                summary["api_request_url_count"] = len(urls)
         return summary
     return {"type": type(payload).__name__}
 
@@ -679,9 +707,10 @@ def _macro_manifest(
         "point_count": point_count,
         "countries": countries,
         "frequencies": frequencies,
-        "preview_rows": _macro_preview_rows(payload),
         "source_references": payload.get("source_references") if isinstance(payload.get("source_references"), list) else [],
     }
+    if kind.endswith("_narrowed"):
+        manifest["preview_rows"] = _macro_preview_rows(payload)
     if extra:
         manifest.update(extra)
     return manifest
@@ -846,9 +875,10 @@ def _domestic_manifest(
         "series_count": len(series_items),
         "observation_count": observation_count,
         "dimensions": dimensions,
-        "preview_rows": _domestic_preview_rows(payload),
         "source_references": payload.get("source_references") if isinstance(payload.get("source_references"), list) else [],
     }
+    if kind.endswith("_narrowed"):
+        manifest["preview_rows"] = _domestic_preview_rows(payload)
     if extra:
         manifest.update(extra)
     return manifest
@@ -957,16 +987,6 @@ def _select_abs_anchor_for_query(metadata_payload: Dict[str, Any], query: str) -
     return None
 
 
-def _parallel_map_ordered(items: List[Any], worker, max_workers: int = 3) -> List[Any]:
-    if not items:
-        return []
-    results: List[Any] = [None] * len(items)
-    with ThreadPoolExecutor(max_workers=max(1, min(max_workers, len(items)))) as executor:
-        futures = {executor.submit(worker, item): idx for idx, item in enumerate(items)}
-        for future in as_completed(futures):
-            idx = futures[future]
-            results[idx] = future.result()
-    return results
 def _route_entry(dataset_id: str) -> Dict[str, Any]:
     entry = get_unified_catalog_entry(dataset_id)
     if entry is None:
@@ -1076,51 +1096,8 @@ server = FastMCP(
     title="Search catalog",
     annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False),
 )
-def search_catalog(query: str = "", queries: Optional[List[str]] = None, forceRefresh: bool = False) -> Dict[str, Any]:
-    """Search the unified catalog and return the top 40 candidate datasets for one query or a small batch of queries.
-
-    Intended role: discovery only. Use this first to build a shortlist, not to retrieve data.
-
-    How to use it:
-    - Single mode: pass one retrieval-oriented query via query.
-    - Batch mode: pass 2 or 3 independent retrieval-oriented queries via queries. The server runs them in parallel and returns one shortlist per query.
-    - Write retrieval-oriented queries, not paraphrases of the user's question.
-    - Include the concept plus likely dataset-family words and requested dimensions such as age, sex, region, frequency, or adjustment.
-    - For Australian domestic questions, prefer ABS-first wording so specific sibling tables such as LF_AGES can surface.
-
-    What to do next:
-    - If one candidate is clearly right, continue to get_metadata or retrieve as appropriate.
-    - If several candidates are plausible, inspect a few of them before committing.
-    - The returned list is an unranked candidate pool. Do not treat earlier rows as better matches by default.
-    """
-    clean_queries = [_clean_text(item) for item in (queries or []) if _clean_text(item)]
-    if clean_queries:
-        started_at = time.perf_counter()
-        clean_queries = clean_queries[:3]
-        attempt_context = _begin_tool_attempt("search_catalog", "batch", {"queries": clean_queries, "forceRefresh": bool(forceRefresh)})
-        logger.info("%stool=search_catalog event=start attempt=%s batch_count=%s refresh=%s", _cid_prefix(), attempt_context["attempt_number"], len(clean_queries), forceRefresh)
-        ensure_unified_catalog_artifacts(bool(forceRefresh))
-        try:
-            def worker(item: str) -> Dict[str, Any]:
-                try:
-                    return {"query": item, "ok": True, "result": search_unified_catalog(item, limit=40, force_refresh=False)}
-                except Exception as exc:
-                    return {"query": item, "ok": False, "error": str(exc)}
-
-            jobs = _parallel_map_ordered(clean_queries, worker, max_workers=3)
-            result = {"count": len(jobs), "jobs": jobs}
-            _finish_tool_attempt_success(attempt_context, _summary(result))
-            logger.info(
-                "%stool=search_catalog event=success duration_ms=%s summary=%s",
-                _cid_prefix(),
-                int((time.perf_counter() - started_at) * 1000),
-                _summary(result),
-            )
-            return result
-        except Exception as exc:
-            _finish_tool_attempt_failure(attempt_context, str(exc))
-            raise
-
+def search_catalog(query: str = "", forceRefresh: bool = False) -> Dict[str, Any]:
+    """Search the unified catalog once for one variable candidate. Do not batch searches."""
     started_at = time.perf_counter()
     attempt_context = _begin_tool_attempt("search_catalog", "single", {"query": _clean_text(query), "forceRefresh": bool(forceRefresh)})
     logger.info("%stool=search_catalog event=start attempt=%s query=%r limit=%s refresh=%s", _cid_prefix(), attempt_context["attempt_number"], query[:160], 40, forceRefresh)
@@ -1148,70 +1125,8 @@ def get_metadata(
     datasetId: str = "",
     query: str = "",
     forceRefresh: bool = False,
-    requests: Optional[List[Dict[str, str]]] = None,
 ) -> Dict[str, Any]:
-    """Get source metadata for one dataset or a small batch of independent datasets when metadata-first retrieval is needed.
-
-    Intended role: inspect the source-defined structure before retrieval, not after retrieval.
-
-    How to use it:
-    - Single mode: pass datasetId plus an optional query.
-    - Batch mode: pass 2 or 3 request objects via requests, each with datasetId and optional query/forceRefresh.
-    - Use batch mode only for independent candidates or component datasets.
-    - In batch mode, each request must be complete on its own. Do not rely on another batch item to supply missing dataset ids or context.
-    - datasetId must be copied exactly from search_catalog results. Do not invent dataset ids from publication titles or guessed source names.
-
-    Source-specific behavior:
-    - ABS: use this first. It returns curated anchor_candidates. Pick one anchor and then call retrieve with anchorType + anchorCode. Do not invent raw dataKey.
-    - ABS anchor_candidates are plausible starting points, not a guarantee that every wildcard anchor path will return records. If one anchor later returns NoRecordsFound, stay on the same dataset and try another plausible anchor type before giving up on the table.
-    - Comtrade: use this first to inspect provider metadata before retrieval.
-    - Custom Australian sources such as RBA or DCCEEW often do not need this step.
-    - World Bank, IMF, and OECD normally do not need this step after shortlist selection.
-
-    Use query to help focus metadata interpretation toward the requested slice.
-    """
-    clean_requests = [item for item in (requests or []) if isinstance(item, dict) and _clean_text(item.get("datasetId"))]
-    if clean_requests:
-        started_at = time.perf_counter()
-        clean_requests = clean_requests[:3]
-        attempt_context = _begin_tool_attempt("get_metadata", "batch", {"requests": clean_requests})
-        logger.info("%stool=get_metadata event=start attempt=%s batch_count=%s", _cid_prefix(), attempt_context["attempt_number"], len(clean_requests))
-
-        try:
-            def worker(item: Dict[str, str]) -> Dict[str, Any]:
-                try:
-                    return {
-                        "datasetId": _clean_text(item.get("datasetId")),
-                        "query": _clean_text(item.get("query")),
-                        "ok": True,
-                        "result": get_metadata(
-                            datasetId=_clean_text(item.get("datasetId")),
-                            query=_clean_text(item.get("query")),
-                            forceRefresh=bool(item.get("forceRefresh")),
-                        ),
-                    }
-                except Exception as exc:
-                    return {
-                        "datasetId": _clean_text(item.get("datasetId")),
-                        "query": _clean_text(item.get("query")),
-                        "ok": False,
-                        "error": str(exc),
-                    }
-
-            jobs = _parallel_map_ordered(clean_requests, worker, max_workers=3)
-            result = {"count": len(jobs), "jobs": jobs}
-            _finish_tool_attempt_success(attempt_context, _summary(result))
-            logger.info(
-                "%stool=get_metadata event=success duration_ms=%s summary=%s",
-                _cid_prefix(),
-                int((time.perf_counter() - started_at) * 1000),
-                _summary(result),
-            )
-            return result
-        except Exception as exc:
-            _finish_tool_attempt_failure(attempt_context, str(exc))
-            raise
-
+    """Inspect metadata for one dataset candidate. For ABS, use returned anchor_candidates with retrieve(anchorType, anchorCode)."""
     started_at = time.perf_counter()
     attempt_context = _begin_tool_attempt("get_metadata", datasetId, {"datasetId": _clean_text(datasetId), "query": _clean_text(query), "forceRefresh": bool(forceRefresh)})
     logger.info("%stool=get_metadata event=start attempt=%s datasetId=%r query=%r", _cid_prefix(), attempt_context["attempt_number"], datasetId[:160], query[:160])
@@ -1261,87 +1176,8 @@ def retrieve(
     flowCode: str = "",
     frequencyCode: str = "",
     hsCodes: Optional[List[str]] = None,
-    requests: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
-    """Retrieve one shortlisted dataset or a small batch of independent datasets and store the raw result as artifacts.
-
-    Intended role: fetch source data after shortlist selection, using the correct source-specific execution path.
-
-    How to use it:
-    - Single mode: pass the normal retrieve arguments for one dataset.
-    - Batch mode: pass 2 or 3 request objects via requests, each shaped like one normal retrieve call.
-    - Use batch mode only for independent alternatives or component datasets. Keep dependent retrieval steps serial.
-    - In batch mode, each request must include its own full retrieval arguments. Do not assume defaults from a sibling batch item.
-    - datasetId must come directly from search_catalog output. Do not invent ids or rewrite titles into ids.
-
-    Source-specific execution:
-    - ABS: do not send raw dataKey. First call get_metadata, choose one anchor from anchor_candidates, then call retrieve with anchorType + anchorCode only. The server builds the wildcard dataKey internally.
-    - ABS: if one metadata-derived anchor returns NoRecordsFound, that does not necessarily mean the table is wrong. Stay on the same dataset, try another plausible anchor type, then inspect what the successful retrieval actually contains.
-    - Custom Australian sources such as RBA or DCCEEW: usually call retrieve directly with datasetId. The adapter handles download and parsing internally.
-    - World Bank, IMF, and OECD: usually call retrieve directly after shortlist selection.
-    - Comtrade: use get_metadata first, then call retrieve with the provider-specific parameters.
-
-    After retrieve:
-    - Use inspect_artifact to decide whether the artifact is already analysis-ready or still needs narrow_artifact.
-    """
-    clean_requests = [item for item in (requests or []) if isinstance(item, dict) and _clean_text(item.get("datasetId"))]
-    if clean_requests:
-        started_at = time.perf_counter()
-        clean_requests = clean_requests[:3]
-        attempt_context = _begin_tool_attempt("retrieve", "batch", {"requests": clean_requests})
-        logger.info("%stool=retrieve event=start attempt=%s batch_count=%s", _cid_prefix(), attempt_context["attempt_number"], len(clean_requests))
-
-        try:
-            def worker(item: Dict[str, Any]) -> Dict[str, Any]:
-                try:
-                    return {
-                        "datasetId": _clean_text(item.get("datasetId")),
-                        "query": _clean_text(item.get("query")),
-                        "ok": True,
-                        "result": retrieve(
-                            datasetId=_clean_text(item.get("datasetId")),
-                            query=_clean_text(item.get("query")),
-                            dataKey=_clean_text(item.get("dataKey")),
-                            anchorType=_clean_text(item.get("anchorType")),
-                            anchorCode=_clean_text(item.get("anchorCode")),
-                            startPeriod=_clean_text(item.get("startPeriod")),
-                            endPeriod=_clean_text(item.get("endPeriod")),
-                            detail=_clean_text(item.get("detail")),
-                            dimensionAtObservation=_clean_text(item.get("dimensionAtObservation")),
-                            forceRefresh=bool(item.get("forceRefresh")),
-                            countries=item.get("countries") if isinstance(item.get("countries"), list) else None,
-                            allCountries=bool(item.get("allCountries")),
-                            startYear=int(item.get("startYear")) if item.get("startYear") is not None else None,
-                            endYear=int(item.get("endYear")) if item.get("endYear") is not None else None,
-                            reporterCodes=item.get("reporterCodes") if isinstance(item.get("reporterCodes"), list) else None,
-                            partnerCodes=item.get("partnerCodes") if isinstance(item.get("partnerCodes"), list) else None,
-                            flowCode=_clean_text(item.get("flowCode")),
-                            frequencyCode=_clean_text(item.get("frequencyCode")),
-                            hsCodes=item.get("hsCodes") if isinstance(item.get("hsCodes"), list) else None,
-                        ),
-                    }
-                except Exception as exc:
-                    return {
-                        "datasetId": _clean_text(item.get("datasetId")),
-                        "query": _clean_text(item.get("query")),
-                        "ok": False,
-                        "error": str(exc),
-                    }
-
-            jobs = _parallel_map_ordered(clean_requests, worker, max_workers=3)
-            result = {"count": len(jobs), "jobs": jobs}
-            _finish_tool_attempt_success(attempt_context, _summary(result))
-            logger.info(
-                "%stool=retrieve event=success duration_ms=%s summary=%s",
-                _cid_prefix(),
-                int((time.perf_counter() - started_at) * 1000),
-                _summary(result),
-            )
-            return result
-        except Exception as exc:
-            _finish_tool_attempt_failure(attempt_context, str(exc))
-            raise
-
+    """Retrieve one source dataset/anchor and store a raw inspect-only artifact. For ABS, pass anchorType and anchorCode, not dataKey. Always inspect then narrow before analysis."""
     started_at = time.perf_counter()
     attempt_context = _begin_tool_attempt(
         "retrieve",
@@ -1439,56 +1275,8 @@ def retrieve(
     title="Inspect artifact",
     annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False),
 )
-def inspect_artifact(artifactId: str = "", artifactIds: Optional[List[str]] = None) -> Dict[str, Any]:
-    """Inspect one stored artifact or a small batch of artifacts and decide whether each is ready for analysis.
-
-    Intended role: decision support after retrieve and before python analysis.
-
-    How to use it:
-    - Single mode: pass one artifactId.
-    - Batch mode: pass 2 or 3 artifact ids via artifactIds when the inspections are independent.
-    - Use batch mode for candidate comparison or component preparation, not for dependent follow-up steps.
-    - Each artifact id should refer to a different concrete stored artifact. Do not rely on inferred latest artifact when inspecting several things.
-
-    What it tells you:
-    - available dimensions and slice hints
-    - artifact size and estimated analysis handoff size
-    - whether the artifact is still broad
-    - whether it is already narrowed and should be used directly
-
-    Typical workflow:
-    - retrieve -> inspect_artifact
-    - if broad, narrow once to the minimum comparable slice
-    - if already narrow enough, send the analysis file to python/code interpreter
-    """
-    clean_artifact_ids = [_clean_text(item) for item in (artifactIds or []) if _clean_text(item)]
-    if clean_artifact_ids:
-        started_at = time.perf_counter()
-        clean_artifact_ids = clean_artifact_ids[:3]
-        attempt_context = _begin_tool_attempt("inspect_artifact", "batch", {"artifactIds": clean_artifact_ids})
-        logger.info("%stool=inspect_artifact event=start attempt=%s batch_count=%s", _cid_prefix(), attempt_context["attempt_number"], len(clean_artifact_ids))
-
-        try:
-            def worker(item: str) -> Dict[str, Any]:
-                try:
-                    return {"artifactId": item, "ok": True, "result": inspect_artifact(artifactId=item)}
-                except Exception as exc:
-                    return {"artifactId": item, "ok": False, "error": str(exc)}
-
-            jobs = _parallel_map_ordered(clean_artifact_ids, worker, max_workers=3)
-            result = {"count": len(jobs), "jobs": jobs}
-            _finish_tool_attempt_success(attempt_context, _summary(result))
-            logger.info(
-                "%stool=inspect_artifact event=success duration_ms=%s summary=%s",
-                _cid_prefix(),
-                int((time.perf_counter() - started_at) * 1000),
-                _summary(result),
-            )
-            return result
-        except Exception as exc:
-            _finish_tool_attempt_failure(attempt_context, str(exc))
-            raise
-
+def inspect_artifact(artifactId: str = "") -> Dict[str, Any]:
+    """Inspect one artifact structure. Raw retrieve artifacts are structure-only; use narrow_artifact before analysis."""
     started_at = time.perf_counter()
     clean_artifact_id = _clean_text(artifactId) or (_latest_artifact_id() or "")
     attempt_context = _begin_tool_attempt("inspect_artifact", clean_artifact_id or "latest", {"artifactId": clean_artifact_id or "latest"})
@@ -1519,7 +1307,18 @@ def inspect_artifact(artifactId: str = "", artifactIds: Optional[List[str]] = No
                     "adjustment": ["Trend", "Seasonally Adjusted", "Original"],
                 },
             }
-            if not _is_matrix_style_domestic_payload(payload) and (
+            if kind == "domestic_retrieve":
+                extra.update(
+                    {
+                        "analysis_should_narrow": True,
+                        "raw_artifact_policy": "inspect_only",
+                        "analysis_guidance": (
+                            "This is a raw retrieved artifact. Use it only to understand structure and choose filters. "
+                            "Before python/code analysis or final numeric claims, call narrow_artifact to isolate the exact metric, geography, frequency, treatment, and period required."
+                        ),
+                    }
+                )
+            elif not _is_matrix_style_domestic_payload(payload) and (
                 observation_count > 400
                 or estimated_bytes > 500_000
                 or bool(slice_hints.get("FREQ"))
@@ -1549,14 +1348,24 @@ def inspect_artifact(artifactId: str = "", artifactIds: Optional[List[str]] = No
                         "analysis_guidance": "This artifact is already narrowed. Use it directly in python/code interpreter unless you need a materially different slice with new explicit filters.",
                     }
                 )
-            if _is_matrix_style_domestic_payload(payload) and estimated_bytes <= MAX_ANALYSIS_UPLOAD_BYTES:
-                extra.update(_upload_analysis_csv(clean_artifact_id, label, headers, rows))
-            elif _is_matrix_style_domestic_payload(payload) and estimated_bytes > MAX_ANALYSIS_UPLOAD_BYTES:
+                if estimated_bytes > MAX_ANALYSIS_UPLOAD_BYTES:
+                    extra.update(
+                        {
+                            "analysis_should_narrow": True,
+                            "use_directly_for_analysis": False,
+                            "analysis_too_large_for_direct_python": True,
+                            "analysis_limit_bytes": MAX_ANALYSIS_UPLOAD_BYTES,
+                            "analysis_guidance": "This narrowed artifact is still too large. Narrow again to the minimum exact metric, geography, frequency, treatment, and period before python analysis.",
+                        }
+                    )
+                else:
+                    extra.update(_upload_analysis_csv(clean_artifact_id, label, headers, rows))
+            elif _is_matrix_style_domestic_payload(payload):
                 extra.update(
                     {
                         "analysis_too_large_for_direct_python": True,
                         "analysis_limit_bytes": MAX_ANALYSIS_UPLOAD_BYTES,
-                        "analysis_guidance": "This matrix-style artifact is too large to send directly to python. Narrow to one correct full matrix or one metric/anchor first, then analyze that full matrix.",
+                        "analysis_guidance": "This matrix-style raw artifact is inspect-only. Narrow to one correct full matrix or one metric/anchor before python analysis.",
                     }
                 )
             manifest = _domestic_manifest(clean_artifact_id, kind, label, f"Inspected domestic artifact '{label}'.", payload, extra)
@@ -1568,17 +1377,42 @@ def inspect_artifact(artifactId: str = "", artifactIds: Optional[List[str]] = No
                 or clean_artifact_id
             )
             extra: Dict[str, Any] = {}
+            if kind == "macro_retrieve":
+                extra.update(
+                    {
+                        "analysis_should_narrow": True,
+                        "raw_artifact_policy": "inspect_only",
+                        "analysis_guidance": (
+                            "This is a raw retrieved macro artifact. Use it only to understand available countries, frequencies, and series. "
+                            "Before python/code analysis or final numeric claims, call narrow_artifact to isolate the exact country set, frequency, series, and period required."
+                        ),
+                    }
+                )
             if kind == "macro_narrowed":
                 headers, rows = _flatten_macro_payload(payload)
-                extra.update(_upload_analysis_csv(clean_artifact_id, label, headers, rows))
+                estimated_bytes = _estimate_csv_bytes(headers, rows)
                 extra.update(
                     {
                         "analysis_should_narrow": False,
                         "already_narrowed": True,
                         "use_directly_for_analysis": True,
                         "analysis_guidance": "This artifact is already narrowed. Use it directly in python/code interpreter unless you need a materially different slice with new explicit filters.",
+                        "analysis_estimated_bytes": estimated_bytes,
+                        "analysis_estimated_mb": round(estimated_bytes / (1024 * 1024), 2),
                     }
                 )
+                if estimated_bytes > MAX_ANALYSIS_UPLOAD_BYTES:
+                    extra.update(
+                        {
+                            "analysis_should_narrow": True,
+                            "use_directly_for_analysis": False,
+                            "analysis_too_large_for_direct_python": True,
+                            "analysis_limit_bytes": MAX_ANALYSIS_UPLOAD_BYTES,
+                            "analysis_guidance": "This narrowed macro artifact is still too large. Narrow again to the minimum exact countries, frequency, series, and period before python analysis.",
+                        }
+                    )
+                else:
+                    extra.update(_upload_analysis_csv(clean_artifact_id, label, headers, rows))
             manifest = _macro_manifest(clean_artifact_id, kind, label, f"Inspected macro artifact '{label}'.", payload, extra or None)
         else:
             raise RuntimeError(f"Unsupported artifact kind for {clean_artifact_id}.")
@@ -1608,74 +1442,9 @@ def narrow_artifact(
     start: str = "",
     end: str = "",
     seriesKeyContains: str = "",
-    maxSeries: int = 12,
-    requests: Optional[List[Dict[str, Any]]] = None,
+    maxSeries: int = 4,
 ) -> Dict[str, Any]:
-    """Narrow one stored artifact or a small batch of artifacts to the minimum comparable slice needed before analysis.
-
-    Intended role: one targeted slice step after inspect_artifact, before python analysis.
-
-    How to call it:
-    - Single mode: pass one artifactId plus the narrowing arguments.
-    - Batch mode: pass 2 or 3 request objects via requests, each shaped like one normal narrow call.
-    - In batch mode, each request must include its own artifactId and its own explicit filters. Do not rely on latest-artifact inference across batch items.
-    - Prefer explicit dimensionFilters in canonical list form.
-    - Example:
-      dimensionFilters=[
-        {'dimension':'AGE','values':['15 - 24 years']},
-        {'dimension':'SEX','values':['Females','Males']},
-        {'dimension':'TSEST','values':['Trend']},
-        {'dimension':'REGION','values':['Australia']},
-        {'dimension':'FREQ','values':['Monthly']}
-      ]
-    - A compatibility fallback map can be provided via dimensionFiltersMap, but the canonical list form is preferred.
-
-    Source-specific nuance:
-    - Domestic time series: use explicit dimension filters rather than fuzzy string matching whenever possible.
-    - Macro: narrow by countries, frequencies, date range, or series key text.
-    - Matrix-style domestic tables: do not use this casually. Narrow only to one correct full matrix or one metric/anchor.
-
-    Guardrails:
-    - Zero-result narrowing fails loudly.
-    - Repeated identical narrows are deduped.
-    - Runaway repeated narrows on the same root artifact are hard-stopped.
-    """
-    clean_requests = [item for item in (requests or []) if isinstance(item, dict) and _clean_text(item.get("artifactId"))]
-    if clean_requests:
-        started_at = time.perf_counter()
-        clean_requests = clean_requests[:3]
-        logger.info("%stool=narrow_artifact event=start batch_count=%s", _cid_prefix(), len(clean_requests))
-
-        def worker(item: Dict[str, Any]) -> Dict[str, Any]:
-            try:
-                return {
-                    "artifactId": _clean_text(item.get("artifactId")),
-                    "ok": True,
-                    "result": narrow_artifact(
-                        artifactId=_clean_text(item.get("artifactId")),
-                        dimensionFilters=item.get("dimensionFilters") if isinstance(item.get("dimensionFilters"), list) else None,
-                        dimensionFiltersMap=item.get("dimensionFiltersMap") if isinstance(item.get("dimensionFiltersMap"), dict) else None,
-                        countryCodes=item.get("countryCodes") if isinstance(item.get("countryCodes"), list) else None,
-                        frequencies=item.get("frequencies") if isinstance(item.get("frequencies"), list) else None,
-                        start=_clean_text(item.get("start")),
-                        end=_clean_text(item.get("end")),
-                        seriesKeyContains=_clean_text(item.get("seriesKeyContains")),
-                        maxSeries=int(item.get("maxSeries")) if item.get("maxSeries") is not None else 12,
-                    ),
-                }
-            except Exception as exc:
-                return {"artifactId": _clean_text(item.get("artifactId")), "ok": False, "error": str(exc)}
-
-        jobs = _parallel_map_ordered(clean_requests, worker, max_workers=3)
-        result = {"count": len(jobs), "jobs": jobs}
-        logger.info(
-            "%stool=narrow_artifact event=success duration_ms=%s summary=%s",
-            _cid_prefix(),
-            int((time.perf_counter() - started_at) * 1000),
-            _summary(result),
-        )
-        return result
-
+    """Create one analysis-ready artifact by isolating the minimum exact slice for one variable. Do not batch narrowing."""
     started_at = time.perf_counter()
     clean_artifact_id = _clean_text(artifactId) or (_latest_artifact_id() or "")
     logger.info("%stool=narrow_artifact event=start artifactId=%r", _cid_prefix(), clean_artifact_id[:160])
@@ -1704,7 +1473,7 @@ def narrow_artifact(
     attempt_context = _begin_narrow_attempt(_root_artifact_id(clean_artifact_id, payload), request)
     if attempt_context.get("deduped_manifest"):
         return attempt_context["deduped_manifest"]
-    limited_max_series = max(1, min(int(maxSeries or 12), 40))
+    limited_max_series = max(1, min(int(maxSeries or 4), 40))
 
     try:
         if kind.startswith("macro"):
@@ -1719,6 +1488,11 @@ def narrow_artifact(
             source_series = payload.get("series") if isinstance(payload.get("series"), list) else []
             if no_explicit_filters and kind == "macro_narrowed":
                 headers, rows = _flatten_macro_payload(payload)
+                estimated_bytes = _estimate_csv_bytes(headers, rows)
+                if estimated_bytes > MAX_ANALYSIS_UPLOAD_BYTES:
+                    raise RuntimeError(
+                        f"Narrowed macro artifact is still too large for python handoff ({estimated_bytes / (1024 * 1024):.2f}MB > 5MB). Narrow further to the minimum exact countries, frequency, series, and period."
+                    )
                 analysis = _upload_analysis_csv(clean_artifact_id, label, headers, rows)
                 manifest = _macro_manifest(
                     clean_artifact_id,
@@ -1769,6 +1543,11 @@ def narrow_artifact(
             artifact_id = f"narrowed-macro-{uuid4()}"
             _store_artifact(narrowed_payload, artifact_id)
             headers, rows = _flatten_macro_payload(narrowed_payload)
+            estimated_bytes = _estimate_csv_bytes(headers, rows)
+            if estimated_bytes > MAX_ANALYSIS_UPLOAD_BYTES:
+                raise RuntimeError(
+                    f"Narrowed macro artifact is still too large for python handoff ({estimated_bytes / (1024 * 1024):.2f}MB > 5MB). Narrow further to the minimum exact countries, frequency, series, and period."
+                )
             analysis = _upload_analysis_csv(artifact_id, f"{label} narrowed", headers, rows)
             manifest = _macro_manifest(
                 artifact_id,
@@ -1890,7 +1669,7 @@ def narrow_artifact(
             estimated_bytes = _estimate_csv_bytes(headers, rows)
             if estimated_bytes > MAX_ANALYSIS_UPLOAD_BYTES:
                 raise RuntimeError(
-                    f"Narrowed artifact is still too large for python handoff ({estimated_bytes / (1024 * 1024):.2f}MB > 50MB). Narrow further to one correct full matrix or one metric/anchor."
+                    f"Narrowed artifact is still too large for python handoff ({estimated_bytes / (1024 * 1024):.2f}MB > 5MB). Narrow further to one correct full matrix or one metric/anchor."
                 )
             analysis = _upload_analysis_csv(artifact_id, f"{label} narrowed", headers, rows)
             manifest = _domestic_manifest(
