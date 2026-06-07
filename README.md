@@ -6,12 +6,12 @@ Produced by [Dottie AI Studio](https://dottieaistudio.com.au/).
 
 Built on existing open source work including [seansoreilly/mcp-server-abs](https://github.com/seansoreilly/mcp-server-abs) and [hanlulong/openecon-data](https://github.com/hanlulong/openecon-data).
 
-The project is built for evidence-led analysis:
+The project is built for evidence-led variable validation:
 
 ```text
-question -> AI-written FTS queries over the unified catalog
--> shortlist candidate datasets -> pick relevant data -> inspect metadata when needed
--> retrieve source data -> inspect/narrow artifacts -> analyze
+user asks for a metric -> search one candidate dataset -> inspect metadata
+-> retrieve one source slice -> inspect one raw artifact -> narrow to one exact variable
+-> show validation preview -> user approves -> save replayable variable recipe
 ```
 
 The MCP does data discovery and retrieval. Agent behaviour lives in [AGENT_SYSTEM_PROMPT.md](AGENT_SYSTEM_PROMPT.md), and development guardrails live in [AGENTS.md](AGENTS.md).
@@ -29,11 +29,24 @@ Start with these files:
 Core tool flow:
 
 ```text
-AI-written query -> search_catalog -> pick data -> get_metadata when needed
--> retrieve -> inspect_artifact -> narrow_artifact -> analyze
+one variable request -> search_catalog -> choose one dataset -> get_metadata
+-> retrieve -> inspect_artifact -> narrow_artifact
+-> validation summary -> save_validated_variable
 ```
 
-Search results are candidate pools. The AI analyst should choose datasets from the shortlist, inspect structure, retrieve real data, and only then answer.
+Search results are candidate pools. The AI analyst chooses one dataset for one variable, inspects structure, retrieves real source data, narrows it to the minimum exact slice, and asks the user to approve before saving.
+
+The MCP tools are intentionally single-call and serial:
+
+- no batch catalog searches
+- no batch metadata inspection
+- no batch retrieval
+- no batch artifact inspection
+- no batch or parallel artifact narrowing
+
+If a user asks for two columns, such as dwelling completions for houses and apartments, the app should validate them as two variables. Each variable gets its own exact narrowed recipe. After approval, later analysis can replay both recipes and join them into one table or spreadsheet.
+
+Runtime artifacts are temporary working files. Validated variables are durable recipes containing the source, dataset, exact retrieval arguments, exact narrowing filters, transformation logic, variable type, and a short recreation summary. Future runs should replay recipes against source data rather than reusing broad old artifacts or discovery transcripts.
 
 ## Data Coverage
 
@@ -62,7 +75,7 @@ Useful discovery keywords:
 - `scripts/build_unified_catalog.py`: rebuilds the unified catalog and FTS index.
 - `frontend/`: app layer being developed on top of the MCP.
 
-The checked-in catalog is a discovery index, not a raw data mirror. Large retrieved results are stored as runtime artifacts so agents can inspect and narrow before analysis.
+The checked-in catalog is a discovery index, not a raw data mirror. Retrieved results are runtime artifacts used only to inspect and narrow one variable. Raw retrieved artifacts are inspect-only; only narrowed artifacts may be used for calculation or validation previews.
 
 ## Quick Start
 
@@ -123,8 +136,8 @@ The web app is evolving into an AI-assisted economic modelling workspace:
 Daily local development from PowerShell with WSL:
 
 ```powershell
-wsl bash -lc "cd /home/projects/abs-mcp && ./start-backend-wsl.sh"
-wsl bash -lc "cd /home/projects/abs-mcp/frontend && npm run dev -- --host 127.0.0.1 --port 3000"
+wsl bash -lc "cd /home/projects/abs-mcp && ./scripts/dev-backend-wsl.sh"
+wsl bash -lc "cd /home/projects/abs-mcp && ./scripts/dev-frontend-wsl.sh"
 ```
 
 To open two visible terminal windows, one for the frontend and one for the backend, both with auto-reload:
@@ -136,5 +149,6 @@ powershell -ExecutionPolicy Bypass -File .\start-visible-dev.ps1 -SkipInstall
 ## Smoke Checks
 
 ```bash
-python3 -m py_compile backend/app/*.py
+python3 -m py_compile backend/app/*.py backend/app/storage/*.py scripts/build_unified_catalog.py
+npm --prefix frontend run build
 ```
