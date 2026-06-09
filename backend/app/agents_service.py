@@ -36,6 +36,7 @@ from openpyxl.styles import Alignment, Font
 from .config import get_settings
 from .model_builder import (
     fetch_model_builder_state,
+    save_custom_calculation_state,
     update_model_assumptions_state,
     update_model_builder_state,
     update_model_graph_state,
@@ -570,6 +571,57 @@ def run_validated_variable(
 
 
 @function_tool(strict_mode=False)
+def save_custom_calculation(
+    ctx: RunContextWrapper[AgentRuntimeContext],
+    node_id: str,
+    label: str,
+    input_node_ids: List[str],
+    output_label: str = "",
+    expression: str = "",
+    method: str = "",
+    assumption_text: str = "",
+    assumption_label: str = "",
+    calculation_logic: Optional[Dict[str, Any]] = None,
+    parameters: Optional[Dict[str, Any]] = None,
+    position_x: Optional[float] = None,
+    position_y: Optional[float] = None,
+) -> Dict[str, Any]:
+    """Save a custom calculation node and its linked assumption when the calculation uses model judgement.
+
+    Use this for scenario, projection, judgement-based, or non-obvious calculations. For simple arithmetic
+    such as +, -, /, or x between existing variables, update the graph normally and leave assumption_text empty.
+    Always pass every input node id, the output label, parameters, and replayable calculation_logic with
+    formula/code/steps sufficient to recreate the calculation later.
+    """
+    context = ctx.context
+    result = save_custom_calculation_state(
+        user_id=context.user_id,
+        project_id=context.project_id,
+        node_id=node_id,
+        label=label,
+        input_node_ids=input_node_ids,
+        output_label=output_label,
+        expression=expression,
+        method=method,
+        assumption_text=assumption_text,
+        assumption_label=assumption_label,
+        calculation_logic=calculation_logic,
+        parameters=parameters,
+        position_x=position_x,
+        position_y=position_y,
+    )
+    return {
+        "updated": True,
+        **result,
+        "instruction": (
+            "The custom calculation is saved in the graph with replayable calculation details. If an "
+            "assumption was supplied, it is linked to the calculation node and should be described to "
+            "the user in one short sentence."
+        ),
+    }
+
+
+@function_tool(strict_mode=False)
 def update_model_builder(
     ctx: RunContextWrapper[AgentRuntimeContext],
     model_builder_state: Dict[str, Any],
@@ -614,7 +666,11 @@ def update_model_graph(
     edges: List[Dict[str, Any]],
     variables: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
-    """Replace only the model graph and, when supplied, active validated-variable links."""
+    """Replace only the model graph and, when supplied, active validated-variable links.
+
+    Calculation nodes should include inputs listing the exact upstream node ids used by the maths. The backend
+    treats those inputs as authoritative and repairs incoming arrows to match them.
+    """
     context = ctx.context
     result = update_model_graph_state(
         user_id=context.user_id,
@@ -684,6 +740,7 @@ def _build_agent(code_container_id: str) -> Agent[Any]:
             search_nisaba_project_memory,
             save_validated_variable,
             run_validated_variable,
+            save_custom_calculation,
             update_model_builder,
             update_model_assumptions,
             update_model_graph,

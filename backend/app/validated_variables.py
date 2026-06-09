@@ -104,6 +104,192 @@ def _extract_validated_api_url(*values: Any) -> str:
     return ""
 
 
+def _short_text(value: Any, limit: int = 280) -> str:
+    text = re.sub(r"\s+", " ", _as_text(value))
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 3)].rstrip() + "..."
+
+
+def _non_empty_dict(value: Any) -> Dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _first_non_empty(*values: Any) -> str:
+    for value in values:
+        text = _as_text(value)
+        if text:
+            return text
+    return ""
+
+
+def _narrow_step_args(retrieval_logic: Dict[str, Any]) -> Dict[str, Any]:
+    for step in retrieval_logic.get("steps") if isinstance(retrieval_logic.get("steps"), list) else []:
+        if isinstance(step, dict) and _as_text(step.get("tool")) == "narrow_artifact":
+            args = step.get("args")
+            return args if isinstance(args, dict) else {}
+    narrow = retrieval_logic.get("narrow")
+    if isinstance(narrow, dict):
+        args = narrow.get("args")
+        return args if isinstance(args, dict) else {}
+    return {}
+
+
+def _contents_preview_payload(evidence_artifact: Dict[str, Any]) -> Dict[str, Any]:
+    preview: Dict[str, Any] = {}
+    latest_preview = evidence_artifact.get("latest_preview")
+    if isinstance(latest_preview, dict) and latest_preview:
+        preview["latest_preview"] = latest_preview
+    validated_points = evidence_artifact.get("validated_points")
+    if isinstance(validated_points, list) and validated_points:
+        preview["validated_points"] = validated_points[:12]
+    manifest = _non_empty_dict(evidence_artifact.get("artifact_manifest"))
+    preview_rows = manifest.get("preview_rows")
+    if isinstance(preview_rows, list) and preview_rows:
+        preview["source_preview_rows"] = preview_rows[:5]
+    return preview
+
+
+def _build_variable_contents_metadata(
+    *,
+    name: str,
+    label: str,
+    source_name: str,
+    provider_id: str,
+    dataset_id: str,
+    metric: str,
+    unit: str,
+    geography: str,
+    frequency: str,
+    seasonal_treatment: str,
+    period_start: str,
+    period_end: str,
+    validated_api_url: str,
+    retrieval_logic: Dict[str, Any],
+    transformation_logic: Dict[str, Any],
+    transform_summary: str,
+    recreation_summary: str,
+    evidence_artifact: Dict[str, Any],
+) -> Dict[str, Any]:
+    manifest = _non_empty_dict(evidence_artifact.get("artifact_manifest"))
+    dimensions = manifest.get("dimensions") if isinstance(manifest.get("dimensions"), dict) else {}
+    narrow_args = _narrow_step_args(retrieval_logic)
+    dimension_filters = narrow_args.get("dimensionFiltersMap")
+    if not isinstance(dimension_filters, dict):
+        dimension_filters = narrow_args.get("dimensionFilters") if isinstance(narrow_args.get("dimensionFilters"), dict) else {}
+    source_frequency = _first_non_empty(transformation_logic.get("source_frequency"), frequency)
+    target_frequency = _first_non_empty(transformation_logic.get("target_frequency"), frequency)
+    transform_text = _first_non_empty(transform_summary, transformation_logic.get("formula"), transformation_logic.get("transform_code"), transformation_logic.get("code"))
+    display_label = _first_non_empty(label, name, metric, "Validated variable")
+    source_label = _first_non_empty(source_name, provider_id, "source")
+    period_text = ""
+    if _as_text(period_start) and _as_text(period_end):
+        period_text = f"{_as_text(period_start)} to {_as_text(period_end)}"
+    elif _as_text(period_start) or _as_text(period_end):
+        period_text = _as_text(period_start) or _as_text(period_end)
+    parts = [
+        f"{display_label} contains {_first_non_empty(metric, display_label)}",
+        f"from {source_label}",
+    ]
+    if _as_text(geography):
+        parts.append(f"for {_as_text(geography)}")
+    if _as_text(unit):
+        parts.append(f"in {_as_text(unit)}")
+    if _as_text(frequency):
+        parts.append(f"at {_as_text(frequency)} frequency")
+    if _as_text(seasonal_treatment):
+        parts.append(f"using {_as_text(seasonal_treatment)} treatment")
+    if period_text:
+        parts.append(f"covering {period_text}")
+    if transform_text:
+        parts.append(f"with transformation: {_short_text(transform_text, 180).rstrip('.')}")
+    contents_summary = _short_text("; ".join(parts) + ".", 900)
+    return {
+        "metadata_version": 1,
+        "contents_summary": contents_summary,
+        "contents": {
+            "name": _as_text(name),
+            "label": display_label,
+            "description": contents_summary,
+            "source": {
+                "name": _as_text(source_name),
+                "provider_id": _as_text(provider_id),
+                "dataset_id": _as_text(dataset_id),
+                "validated_api_url": _as_text(validated_api_url),
+            },
+            "metric": _as_text(metric),
+            "unit": _as_text(unit),
+            "geography": _as_text(geography),
+            "frequency": _as_text(frequency),
+            "seasonal_treatment": _as_text(seasonal_treatment),
+            "period_start": _as_text(period_start),
+            "period_end": _as_text(period_end),
+            "source_frequency": source_frequency,
+            "target_frequency": target_frequency,
+            "transformation": {
+                "summary": _as_text(transform_summary),
+                "logic": transformation_logic,
+            },
+            "recreation_summary": _as_text(recreation_summary),
+            "selection": {
+                "artifact_id": _as_text(evidence_artifact.get("artifact_id")),
+                "artifact_kind": _as_text(evidence_artifact.get("kind")),
+                "dimension_filters": dimension_filters,
+                "dimensions": dimensions,
+                "series_count": manifest.get("series_count"),
+                "observation_count": manifest.get("observation_count") or manifest.get("point_count"),
+            },
+            "preview": _contents_preview_payload(evidence_artifact),
+        },
+    }
+
+
+def _with_variable_contents_metadata(
+    *,
+    name: str,
+    label: str,
+    source_name: str,
+    provider_id: str,
+    dataset_id: str,
+    metric: str,
+    unit: str,
+    geography: str,
+    frequency: str,
+    seasonal_treatment: str,
+    period_start: str,
+    period_end: str,
+    validated_api_url: str,
+    retrieval_logic: Dict[str, Any],
+    transformation_logic: Dict[str, Any],
+    transform_summary: str,
+    recreation_summary: str,
+    evidence_artifact: Dict[str, Any],
+) -> Dict[str, Any]:
+    enriched = dict(evidence_artifact or {})
+    metadata = _build_variable_contents_metadata(
+        name=name,
+        label=label,
+        source_name=source_name,
+        provider_id=provider_id,
+        dataset_id=dataset_id,
+        metric=metric,
+        unit=unit,
+        geography=geography,
+        frequency=frequency,
+        seasonal_treatment=seasonal_treatment,
+        period_start=period_start,
+        period_end=period_end,
+        validated_api_url=validated_api_url,
+        retrieval_logic=retrieval_logic,
+        transformation_logic=transformation_logic,
+        transform_summary=transform_summary,
+        recreation_summary=recreation_summary,
+        evidence_artifact=enriched,
+    )
+    enriched.update(metadata)
+    return enriched
+
+
 def _lookup_path(value: Any, path: str) -> Any:
     current = value
     for part in path.split("."):
@@ -398,6 +584,26 @@ def save_validated_variable_record(
         raise RuntimeError(
             "Validated variables must save the working validated_api_url from the API/MCP call that passed validation."
         )
+    evidence_artifact = _with_variable_contents_metadata(
+        name=name,
+        label=label,
+        source_name=source_name,
+        provider_id=provider_id,
+        dataset_id=dataset_id,
+        metric=metric,
+        unit=unit,
+        geography=geography,
+        frequency=frequency,
+        seasonal_treatment=seasonal_treatment,
+        period_start=period_start,
+        period_end=period_end,
+        validated_api_url=validated_api_url,
+        retrieval_logic=retrieval_logic,
+        transformation_logic=transformation_logic,
+        transform_summary=transform_summary,
+        recreation_summary=recreation_summary,
+        evidence_artifact=evidence_artifact,
+    )
     _validate_validated_recipe(
         retrieval_logic=retrieval_logic,
         transformation_logic=transformation_logic,
@@ -459,7 +665,9 @@ def save_validated_variable_record(
               approved_by = excluded.approved_by,
               approved_at = now(),
               updated_at = now()
-            returning id, external_key, name, label, source_name, metric, unit, validated_api_url, transform_summary, recreation_summary, validation_status
+            returning id, external_key, name, label, source_name, metric, unit, validated_api_url,
+              transform_summary, recreation_summary, validation_status,
+              evidence_artifact->>'contents_summary' as contents_summary
             """,
             {
                 "user_id": user_id,

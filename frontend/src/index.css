@@ -364,6 +364,11 @@ body {
   font-weight: 750;
 }
 
+.model-node-custom-calculation text {
+  font-size: 9px;
+  font-weight: 700;
+}
+
 .model-node {
   cursor: grab;
 }

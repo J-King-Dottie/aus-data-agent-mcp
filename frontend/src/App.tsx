@@ -73,14 +73,24 @@ interface ValidatedVariable {
   frequency: string;
   seasonalTreatment: string;
   transformSummary: string;
+  contentsSummary?: string;
+  contents?: Record<string, unknown>;
   validationStatus: "candidate" | "validated" | "rejected";
 }
 
 interface ModelAssumption {
   id: string;
   variableId?: string;
+  nodeId?: string;
   label: string;
   valueText: string;
+  method?: string;
+  inputs?: string[];
+  output?: string;
+  logicSummary?: string;
+  parameters?: Record<string, unknown>;
+  calculationLogic?: Record<string, unknown>;
+  calculationSpec?: Record<string, unknown>;
 }
 
 interface ModelNode {
@@ -88,7 +98,17 @@ interface ModelNode {
   label: string;
   nodeType: "variable" | "assumption" | "calculation" | "result";
   variableId?: string;
+  assumptionId?: string;
   expression?: string;
+  method?: string;
+  inputs?: string[];
+  output?: string;
+  sourceCalculationId?: string;
+  logicSummary?: string;
+  tooltip?: string;
+  parameters?: Record<string, unknown>;
+  calculationLogic?: Record<string, unknown>;
+  calculationSpec?: Record<string, unknown>;
   positionX?: number;
   positionY?: number;
 }
@@ -1102,6 +1122,10 @@ function toTextArray(value: unknown) {
   return Array.isArray(value) ? value.map((item) => toText(item)).filter(Boolean) : [];
 }
 
+function toRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
+}
+
 function createEmptyModelBuilderState(): ModelBuilderState {
   return { variables: [], assumptions: [], nodes: [], edges: [] };
 }
@@ -1183,6 +1207,9 @@ async function updateProjectModelBuilderState(projectId: string, nextState: Mode
 
 function mapVariableRow(row: Record<string, unknown>): ValidatedVariable {
   const status = toText(row.validation_status);
+  const evidenceArtifact = toRecord(row.evidence_artifact);
+  const contents = toRecord(evidenceArtifact?.contents);
+  const contentsSummary = toText(row.contentsSummary) || toText(row.contents_summary) || toText(evidenceArtifact?.contents_summary);
   return {
     id: toText(row.id) || createConversationId(),
     name: toText(row.name) || toText(row.label) || "variable",
@@ -1194,6 +1221,8 @@ function mapVariableRow(row: Record<string, unknown>): ValidatedVariable {
     frequency: toText(row.frequency),
     seasonalTreatment: toText(row.seasonal_treatment),
     transformSummary: toText(row.transform_summary),
+    contentsSummary: contentsSummary || undefined,
+    contents: contents || undefined,
     validationStatus: status === "validated" ? "validated" : status === "rejected" ? "rejected" : "candidate",
   };
 }
@@ -1217,17 +1246,30 @@ function normalizeModelSpec(spec: ModelBuilderSpec | null): ModelBuilderState | 
       frequency: toText(variable.frequency),
       seasonalTreatment: toText(variable.seasonalTreatment),
       transformSummary: toText(variable.transformSummary),
+      contentsSummary: toText(variable.contentsSummary) || undefined,
+      contents: toRecord(variable.contents) || undefined,
       validationStatus: status === "candidate" || status === "rejected" ? status : "validated",
     };
   });
 
   const assumptions = (spec.assumptions || [])
-    .map((assumption, index): ModelAssumption => ({
-      id: toText(assumption.id) || `assumption-${index + 1}`,
-      variableId: toText(assumption.variableId) || toText(assumption.variable) || undefined,
-      label: toText(assumption.label) || "Assumption",
-      valueText: toText(assumption.valueText),
-    }));
+    .map((assumption, index): ModelAssumption => {
+      const raw = assumption as Record<string, unknown>;
+      return {
+        id: toText(assumption.id) || `assumption-${index + 1}`,
+        variableId: toText(assumption.variableId) || toText(assumption.variable) || undefined,
+        nodeId: toText(raw.nodeId) || toText(raw.node_id) || toText(raw.calculationNodeId) || undefined,
+        label: toText(assumption.label) || "Assumption",
+        valueText: toText(assumption.valueText),
+        method: toText(raw.method) || undefined,
+        inputs: toTextArray(raw.inputs),
+        output: toText(raw.output) || undefined,
+        logicSummary: toText(raw.logicSummary) || toText(raw.logic_summary) || undefined,
+        parameters: toRecord(raw.parameters) || undefined,
+        calculationLogic: toRecord(raw.calculationLogic) || toRecord(raw.calculation_logic) || undefined,
+        calculationSpec: toRecord(raw.calculationSpec) || toRecord(raw.calculation_spec) || undefined,
+      };
+    });
 
   const nodes = (spec.nodes || []).map((node, index): ModelNode => {
     const id = toText(node.id) || `node-${index + 1}`;
@@ -1240,7 +1282,17 @@ function normalizeModelSpec(spec: ModelBuilderSpec | null): ModelBuilderState | 
           ? nodeType
           : "variable",
       variableId: toText(node.variableId) || undefined,
+      assumptionId: toText((node as Record<string, unknown>).assumptionId) || toText((node as Record<string, unknown>).assumption_id) || undefined,
       expression: toText(node.expression) || undefined,
+      method: toText((node as Record<string, unknown>).method) || undefined,
+      inputs: toTextArray((node as Record<string, unknown>).inputs),
+      output: toText((node as Record<string, unknown>).output) || undefined,
+      sourceCalculationId: toText((node as Record<string, unknown>).sourceCalculationId) || toText((node as Record<string, unknown>).source_calculation_id) || undefined,
+      logicSummary: toText((node as Record<string, unknown>).logicSummary) || toText((node as Record<string, unknown>).logic_summary) || undefined,
+      tooltip: toText((node as Record<string, unknown>).tooltip) || undefined,
+      parameters: toRecord((node as Record<string, unknown>).parameters) || undefined,
+      calculationLogic: toRecord((node as Record<string, unknown>).calculationLogic) || toRecord((node as Record<string, unknown>).calculation_logic) || undefined,
+      calculationSpec: toRecord((node as Record<string, unknown>).calculationSpec) || toRecord((node as Record<string, unknown>).calculation_spec) || undefined,
       positionX: Number.isFinite(Number(node.positionX)) ? Number(node.positionX) : undefined,
       positionY: Number.isFinite(Number(node.positionY)) ? Number(node.positionY) : undefined,
     };
@@ -1619,9 +1671,16 @@ function ProjectsPane({
 
 function modelNodeSize(node: ModelNode) {
   if (node.nodeType === "calculation") {
+    if (isCustomCalculationNode(node)) {
+      return { width: 96, height: 34 };
+    }
     return { width: 40, height: 40 };
   }
   return { width: 122, height: 42 };
+}
+
+function isCustomCalculationNode(node: ModelNode) {
+  return node.nodeType === "calculation" && Boolean(node.assumptionId || node.method || node.expression === "custom");
 }
 
 function mathSymbol(value: string) {
@@ -1681,6 +1740,73 @@ function mathNodeLabel(node: ModelNode) {
     return "=";
   }
   return "";
+}
+
+function compactJson(value: unknown) {
+  if (!value || typeof value !== "object") {
+    return "";
+  }
+  const entries = Object.entries(value as Record<string, unknown>)
+    .filter(([, item]) => item !== undefined && item !== null && item !== "")
+    .slice(0, 5)
+    .map(([key, item]) => `${key}: ${Array.isArray(item) ? item.join(", ") : String(item)}`);
+  return entries.join("; ");
+}
+
+function calculationReplaySummary(value: unknown) {
+  const spec = toRecord(value);
+  const replay = toRecord(spec?.replay);
+  return toText(replay?.formula) || toText(replay?.code) || "";
+}
+
+function labelForNodeId(nodeId: string, nodeMap: Map<string, ModelNode>, variables: ValidatedVariable[]) {
+  const node = nodeMap.get(nodeId);
+  if (!node) {
+    return nodeId;
+  }
+  const variable = variables.find((item) => item.id === (node.variableId || node.id));
+  return variable?.label || variable?.name || node.label || node.id;
+}
+
+function modelNodeTooltip(
+  node: ModelNode,
+  nodeMap: Map<string, ModelNode>,
+  variables: ValidatedVariable[],
+  assumptions: ModelAssumption[]
+) {
+  const variable = variables.find((item) => item.id === (node.variableId || node.id));
+  const assumption = assumptions.find((item) => item.id === node.assumptionId || item.nodeId === node.id);
+  if (variable) {
+    return [
+      variable.label || variable.name,
+      variable.contentsSummary || [variable.sourceName, variable.metric, variable.geography, variable.frequency, variable.unit].filter(Boolean).join(" · "),
+      variable.transformSummary,
+    ].filter(Boolean).join("\n");
+  }
+  if (assumption || node.assumptionId) {
+    const inputLabels = (node.inputs || assumption?.inputs || []).map((id) => labelForNodeId(id, nodeMap, variables)).join(", ");
+    const replaySummary = calculationReplaySummary(node.calculationSpec || assumption?.calculationSpec);
+    return [
+      assumption?.valueText || node.logicSummary || node.tooltip || node.label,
+      node.method || assumption?.method ? `Method: ${node.method || assumption?.method}` : "",
+      inputLabels ? `Inputs: ${inputLabels}` : "",
+      node.output || assumption?.output ? `Output: ${node.output || assumption?.output}` : "",
+      replaySummary ? `Replay: ${replaySummary}` : "",
+      compactJson(node.parameters || assumption?.parameters),
+    ].filter(Boolean).join("\n");
+  }
+  if (node.nodeType === "calculation") {
+    const inputLabels = (node.inputs || []).map((id) => labelForNodeId(id, nodeMap, variables)).join(", ");
+    return [
+      node.label,
+      node.expression ? `Operation: ${node.expression}` : "",
+      inputLabels ? `Inputs: ${inputLabels}` : "",
+    ].filter(Boolean).join("\n");
+  }
+  if (node.nodeType === "result") {
+    return [node.label, node.logicSummary || node.tooltip || "Model output"].filter(Boolean).join("\n");
+  }
+  return node.tooltip || node.label;
 }
 
 function operationIdFor(targetNodeId: string, symbol: string) {
@@ -2085,10 +2211,14 @@ function centeredModelViewport(nodes: ModelNode[], canvasWidth: number, canvasHe
 function ModelFlowDiagram({
   nodes,
   edges,
+  variables,
+  assumptions,
   onMoveNode,
 }: {
   nodes: ModelNode[];
   edges: ModelEdge[];
+  variables: ValidatedVariable[];
+  assumptions: ModelAssumption[];
   onMoveNode: (nodeId: string, position: { x: number; y: number }) => void;
 }) {
   const canvasWidth = 560;
@@ -2280,13 +2410,18 @@ function ModelFlowDiagram({
         return (
           <g
             key={node.id}
-            className={`model-node model-node-${node.nodeType}${dragState?.nodeId === node.id ? " dragging" : ""}`}
+            className={`model-node model-node-${node.nodeType}${isCustomCalculationNode(node) ? " model-node-custom-calculation" : ""}${dragState?.nodeId === node.id ? " dragging" : ""}`}
             transform={`translate(${x} ${y})`}
             onMouseDown={(event) => beginDrag(event, node)}
           >
+            <title>{modelNodeTooltip(node, nodeMap, variables, assumptions)}</title>
             <rect width={size.width} height={size.height} rx={node.nodeType === "calculation" ? "20" : "10"} />
             <text x={size.width / 2} y={size.height / 2}>
-              {node.nodeType === "calculation" ? mathNodeLabel(node) || truncateNodeLabel(node.label, 6) : truncateNodeLabel(node.label, 32)}
+              {node.nodeType === "calculation"
+                ? isCustomCalculationNode(node)
+                  ? truncateNodeLabel(node.label, 16)
+                  : mathNodeLabel(node) || truncateNodeLabel(node.label, 6)
+                : truncateNodeLabel(node.label, 32)}
             </text>
           </g>
         );
@@ -2334,13 +2469,14 @@ function ModelBuilderPane({
               <div className="canvas-variable-list">
                 {variables.length ? (
                   variables.slice(0, 6).map((variable) => {
-                    const description = [
+                    const fallbackDescription = [
                       variable.metric,
                       variable.geography,
                       variable.frequency,
                       variable.unit,
                       variable.sourceName,
                     ].filter(Boolean).join(" · ");
+                    const description = variable.contentsSummary || fallbackDescription;
                     return (
                       <p key={variable.id}>
                         <span>{variable.label || variable.name}</span>
@@ -2371,7 +2507,10 @@ function ModelBuilderPane({
               <div className="assumption-list canvas-assumption-list">
                 {assumptions.length ? (
                   assumptions.slice(0, 5).map((assumption) => (
-                    <p key={assumption.id}>
+                    <p
+                      key={assumption.id}
+                      title={[assumption.valueText, assumption.method ? `Method: ${assumption.method}` : "", assumption.output ? `Output: ${assumption.output}` : ""].filter(Boolean).join("\n")}
+                    >
                       <span>{assumption.label}</span>
                       {assumption.valueText ? <small>{assumption.valueText}</small> : null}
                     </p>
@@ -2383,7 +2522,13 @@ function ModelBuilderPane({
             ) : null}
           </section>
         </div>
-        <ModelFlowDiagram nodes={nodes} edges={edges} onMoveNode={onMoveNode} />
+        <ModelFlowDiagram
+          nodes={nodes}
+          edges={edges}
+          variables={variables}
+          assumptions={assumptions}
+          onMoveNode={onMoveNode}
+        />
       </div>
     </aside>
   );
@@ -2784,7 +2929,7 @@ function App() {
 
       const variablesResult = await supabase
         .from("validated_variables")
-        .select("id,name,label,source_name,metric,unit,geography,frequency,seasonal_treatment,transform_summary,validation_status")
+        .select("id,name,label,source_name,metric,unit,geography,frequency,seasonal_treatment,transform_summary,validation_status,evidence_artifact")
         .in("id", activeVariableIds);
       if (!active) {
         return;
