@@ -96,6 +96,12 @@ logger = _configure_logger()
 frontend_dist = Path(__file__).resolve().parents[2] / "frontend" / "dist"
 _RUN_TASKS: dict[str, asyncio.Task] = {}
 _EXPORT_TASKS: dict[str, asyncio.Task] = {}
+_DEFAULT_CORS_ORIGINS = [
+    "http://127.0.0.1:3000",
+    "http://localhost:3000",
+    "http://127.0.0.1:5173",
+    "http://localhost:5173",
+]
 
 
 def _should_skip_request_logging(request: Request) -> bool:
@@ -107,18 +113,18 @@ def _should_skip_request_logging(request: Request) -> bool:
 
 def _cors_origins() -> list[str]:
     raw = os.getenv("CORS_ALLOWED_ORIGINS", "")
-    return [origin.strip() for origin in raw.split(",") if origin.strip()]
+    origins = [origin.strip() for origin in raw.split(",") if origin.strip()]
+    return origins or _DEFAULT_CORS_ORIGINS
 
 
 allowed_origins = _cors_origins()
-if allowed_origins:
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=allowed_origins,
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=allowed_origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 @app.get("/health", tags=["health"])

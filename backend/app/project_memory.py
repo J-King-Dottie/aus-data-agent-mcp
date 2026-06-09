@@ -18,6 +18,8 @@ logger = logging.getLogger("abs.backend.project_memory")
 
 PROJECT_COMPACT_MEMORY_CHAR_LIMIT = 4000
 PROJECT_MEMORY_SEARCH_LIMIT = 30
+PROJECT_CHAT_HISTORY_RUN_LIMIT = 50
+PROJECT_MEMORY_COMPACT_EVERY_PAIRS = 5
 
 
 def _as_text(value: Any) -> str:
@@ -190,24 +192,35 @@ def search_project_compact_memory(
     return [item for _, item in scored[:max_results]]
 
 
-def fetch_project_chat_runs(*, user_id: str, project_id: str, conversation_id: str) -> List[Dict[str, Any]]:
-    if not _as_text(user_id) or not _as_text(project_id) or not _as_text(conversation_id) or not _db_url():
+def fetch_project_chat_runs(
+    *,
+    user_id: str,
+    project_id: str,
+    limit: int = PROJECT_CHAT_HISTORY_RUN_LIMIT,
+) -> List[Dict[str, Any]]:
+    if not _as_text(user_id) or not _as_text(project_id) or not _db_url():
         return []
+    safe_limit = max(1, min(int(limit or PROJECT_CHAT_HISTORY_RUN_LIMIT), 200))
     try:
         with _connect() as conn:
             rows = conn.execute(
                 """
-                select id, user_message, progress_notes, final_response, run_cost, run_index, status
-                from public.modelling_chat_messages
-                where user_id = %s
-                  and project_id = %s
-                  and conversation_id = %s
-                order by run_index asc, created_at asc
+                select *
+                from (
+                    select id, user_message, progress_notes, final_response, run_cost, run_index, status,
+                           conversation_id, created_at
+                    from public.modelling_chat_messages
+                    where user_id = %s
+                      and project_id = %s
+                    order by created_at desc, run_index desc
+                    limit %s
+                ) recent_runs
+                order by created_at asc, run_index asc
                 """,
-                (user_id, project_id, conversation_id),
+                (user_id, project_id, safe_limit),
             ).fetchall()
     except Exception as exc:
-        logger.warning("project_chat_history_fetch_failed project_id=%s conversation_id=%s error=%s", project_id, conversation_id, exc)
+        logger.warning("project_chat_history_fetch_failed project_id=%s error=%s", project_id, exc)
         return []
     return [dict(row) for row in rows if isinstance(row, dict)]
 
@@ -237,9 +250,9 @@ def chat_messages_from_runs(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return messages
 
 
-def fetch_project_chat_messages(*, user_id: str, project_id: str, conversation_id: str) -> List[Dict[str, Any]]:
+def fetch_project_chat_messages(*, user_id: str, project_id: str) -> List[Dict[str, Any]]:
     return chat_messages_from_runs(
-        fetch_project_chat_runs(user_id=user_id, project_id=project_id, conversation_id=conversation_id)
+        fetch_project_chat_runs(user_id=user_id, project_id=project_id)
     )
 
 
@@ -406,7 +419,11 @@ def compact_project_memory_after_run(
 
     previous = fetch_project_compact_memory(user_id=user_id, project_id=project_id)
     previous_count = int(previous.get("last_compacted_message_count") or 0)
-    if previous.get("last_compacted_conversation_id") == conversation_id and previous_count >= len(messages):
+    pair_count = len(pairs)
+    has_previous_memory = bool(_as_text(previous.get("memory_text")))
+    previous_bucket = previous_count // PROJECT_MEMORY_COMPACT_EVERY_PAIRS
+    current_bucket = pair_count // PROJECT_MEMORY_COMPACT_EVERY_PAIRS
+    if has_previous_memory and previous_count > 0 and current_bucket <= previous_bucket:
         return False
 
     recent_pairs = pairs[-12:]
@@ -425,7 +442,7 @@ def compact_project_memory_after_run(
             """
             update public.modelling_projects
             set memory_text = %s,
-                last_compacted_conversation_id = %s,
+                last_compacted_conversation_id = '',
                 last_compacted_message_count = %s,
                 last_compacted_created_at = %s,
                 updated_at = %s
@@ -433,8 +450,7 @@ def compact_project_memory_after_run(
             """,
             (
                 memory_text,
-                conversation_id,
-                len(messages),
+                pair_count,
                 _utc_now_iso(),
                 _utc_now_iso(),
                 user_id,

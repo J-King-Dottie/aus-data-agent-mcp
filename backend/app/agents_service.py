@@ -508,7 +508,13 @@ def save_validated_variable(
     """
     context = ctx.context
     retrieval_logic = retrieval_logic or {}
+    transformation_logic = _with_default_identity_transform(transformation_logic or {})
     evidence_artifact = evidence_artifact or {}
+    retrieval_logic, evidence_artifact = _merge_executed_validated_recipe(
+        context=context,
+        retrieval_logic=retrieval_logic,
+        evidence_artifact=evidence_artifact,
+    )
     _assert_validated_variable_is_narrowed(context, retrieval_logic, evidence_artifact)
     validated_api_url, validated_api_urls = _validated_api_urls_from_mcp_artifacts(
         context=context,
@@ -535,7 +541,7 @@ def save_validated_variable(
         period_end=period_end,
         validated_api_url=validated_api_url,
         retrieval_logic=retrieval_logic,
-        transformation_logic=transformation_logic or {},
+        transformation_logic=transformation_logic,
         transform_summary=transform_summary,
         recreation_summary=recreation_summary,
         evidence_artifact=evidence_artifact,
@@ -895,6 +901,13 @@ def _latest_artifact_record(state) -> Optional[Dict[str, Any]]:
     return None
 
 
+def _latest_narrowed_artifact_record(state) -> Optional[Dict[str, Any]]:
+    for item in reversed(state.artifacts):
+        if isinstance(item, dict) and "narrowed" in str(item.get("kind") or "").strip():
+            return item
+    return None
+
+
 def _artifact_payload_from_record(record: Dict[str, Any]) -> Any:
     path = Path(str(record.get("path") or ""))
     if not path.exists() or path.suffix.lower() != ".json":
@@ -1040,6 +1053,167 @@ def _validated_api_urls_from_mcp_artifacts(
         url = str(current_url).strip()
         return url, [url]
     raise RuntimeError("Cannot save validated variable: the MCP retrieve artifact does not include a real api_request_url.")
+
+
+def _tool_call_from_record_or_trace(context: AgentRuntimeContext, record: Dict[str, Any], expected_tool: str) -> Dict[str, Any]:
+    tool_call = record.get("tool_call") if isinstance(record.get("tool_call"), dict) else {}
+    if (
+        isinstance(tool_call.get("args"), dict)
+        and str(tool_call.get("tool_name") or "").strip() == str(expected_tool or "").strip()
+    ):
+        return tool_call
+    artifact_id = str(record.get("artifact_id") or "").strip()
+    return _trace_tool_call_for_artifact(context.conversation_id, artifact_id, expected_tool=expected_tool)
+
+
+def _artifact_evidence_payload(state: Any, record: Dict[str, Any]) -> Dict[str, Any]:
+    evidence: Dict[str, Any] = {
+        "artifact_id": str(record.get("artifact_id") or "").strip(),
+        "parent_artifact_id": str(record.get("parent_artifact_id") or "").strip(),
+        "kind": str(record.get("kind") or "").strip(),
+        "label": str(record.get("label") or "").strip(),
+        "summary": str(record.get("summary") or "").strip(),
+    }
+    api_url = _artifact_api_request_url(state, record)
+    api_urls = _artifact_api_request_urls(state, record)
+    if api_url:
+        evidence["api_request_url"] = api_url
+    if api_urls:
+        evidence["api_request_urls"] = api_urls
+    refs = record.get("source_references") if isinstance(record.get("source_references"), list) else []
+    if refs:
+        evidence["source_references"] = refs
+    for key in ("analysis_container_id", "analysis_file_id", "analysis_filename", "analysis_local_path"):
+        value = str(record.get(key) or "").strip()
+        if value:
+            evidence[key] = value
+    try:
+        payload = _artifact_payload_from_record(record)
+    except Exception:
+        payload = None
+    if isinstance(payload, dict):
+        evidence["artifact_manifest"] = _artifact_manifest_summary(record, payload)
+        dataset = payload.get("dataset") if isinstance(payload.get("dataset"), dict) else {}
+        dataset_id = str(dataset.get("id") or dataset.get("dataset_id") or payload.get("dataset_id") or "").strip()
+        if dataset_id:
+            evidence["dataset_id"] = dataset_id
+    return {key: value for key, value in evidence.items() if value not in ("", [], {})}
+
+
+def _replace_artifact_arg_with_latest(args: Dict[str, Any]) -> Dict[str, Any]:
+    normalized = json.loads(json.dumps(args or {}, ensure_ascii=False))
+    if "artifactId" in normalized:
+        normalized["artifactId"] = "${latest_artifact_id}"
+    elif "artifact_id" in normalized:
+        normalized["artifact_id"] = "${latest_artifact_id}"
+    else:
+        normalized["artifactId"] = "${latest_artifact_id}"
+    return normalized
+
+
+def _has_transformation_details(value: Dict[str, Any]) -> bool:
+    return isinstance(value, dict) and any(key in value for key in ("transform_code", "code", "formula", "steps"))
+
+
+def _with_default_identity_transform(transformation_logic: Dict[str, Any]) -> Dict[str, Any]:
+    if _has_transformation_details(transformation_logic):
+        return transformation_logic
+    normalized = dict(transformation_logic or {})
+    normalized["transform_code"] = "return the narrowed series unchanged"
+    normalized["transform_type"] = "identity"
+    return normalized
+
+
+def _executed_validated_recipe_from_latest_narrowed(
+    context: AgentRuntimeContext,
+) -> tuple[Dict[str, Any], Dict[str, Any]]:
+    state = context.store.load(context.conversation_id)
+    narrowed_record = _latest_narrowed_artifact_record(state)
+    if not isinstance(narrowed_record, dict):
+        raise RuntimeError(
+            "Cannot save validated variable: no narrowed MCP artifact is available in this conversation. "
+            "Run inspect_artifact and narrow_artifact, show the narrowed preview, then save after approval."
+        )
+    parent_artifact_id = str(narrowed_record.get("parent_artifact_id") or "").strip()
+    parent_record = _artifact_record_by_id(state, parent_artifact_id) if parent_artifact_id else None
+    if not isinstance(parent_record, dict):
+        raise RuntimeError(
+            "Cannot save validated variable: the latest narrowed artifact does not link back to its retrieve artifact."
+        )
+
+    retrieve_call = _tool_call_from_record_or_trace(context, parent_record, "retrieve")
+    narrow_call = _tool_call_from_record_or_trace(context, narrowed_record, "narrow_artifact")
+    retrieve_args = retrieve_call.get("args") if isinstance(retrieve_call.get("args"), dict) else {}
+    narrow_args = narrow_call.get("args") if isinstance(narrow_call.get("args"), dict) else {}
+    if str(retrieve_call.get("tool_name") or "").strip() != "retrieve" or not retrieve_args:
+        raise RuntimeError("Cannot save validated variable: the executed retrieve call args are missing from the trace.")
+    if str(narrow_call.get("tool_name") or "").strip() != "narrow_artifact" or not narrow_args:
+        raise RuntimeError("Cannot save validated variable: the executed narrow_artifact call args are missing from the trace.")
+
+    api_urls = _artifact_api_request_urls(state, narrowed_record)
+    inspect_call = _trace_inspect_call_for_artifact(context.conversation_id, parent_artifact_id)
+    retrieval_logic: Dict[str, Any] = {
+        "version": 1,
+        "source": "executed_mcp_recipe",
+        "steps": [
+            {
+                "id": "retrieve",
+                "tool": "retrieve",
+                "args": json.loads(json.dumps(retrieve_args, ensure_ascii=False)),
+            },
+            {
+                "id": "narrow",
+                "tool": "narrow_artifact",
+                "args": _replace_artifact_arg_with_latest(narrow_args),
+            },
+        ],
+        "provenance": {
+            "raw_artifact_id": str(parent_record.get("artifact_id") or "").strip(),
+            "narrowed_artifact_id": str(narrowed_record.get("artifact_id") or "").strip(),
+            "retrieve_call_id": str(retrieve_call.get("call_id") or "").strip(),
+            "narrow_call_id": str(narrow_call.get("call_id") or "").strip(),
+        },
+    }
+    if api_urls:
+        retrieval_logic["validated_api_url"] = api_urls[0]
+        retrieval_logic["api_request_urls"] = api_urls
+    if inspect_call:
+        retrieval_logic["provenance"]["inspect_step"] = {
+            "tool": "inspect_artifact",
+            "args": inspect_call.get("args") if isinstance(inspect_call.get("args"), dict) else {},
+            "call_id": str(inspect_call.get("call_id") or "").strip(),
+        }
+    for key in ("analysis_container_id", "analysis_file_id", "analysis_filename", "analysis_local_path"):
+        value = str(narrowed_record.get(key) or "").strip()
+        if value:
+            retrieval_logic["provenance"][key] = value
+
+    return retrieval_logic, _artifact_evidence_payload(state, narrowed_record)
+
+
+def _merge_executed_validated_recipe(
+    *,
+    context: AgentRuntimeContext,
+    retrieval_logic: Dict[str, Any],
+    evidence_artifact: Dict[str, Any],
+) -> tuple[Dict[str, Any], Dict[str, Any]]:
+    try:
+        executed_retrieval_logic, executed_evidence_artifact = _executed_validated_recipe_from_latest_narrowed(context)
+    except RuntimeError:
+        if retrieval_logic or evidence_artifact:
+            return retrieval_logic, evidence_artifact
+        raise
+
+    merged_retrieval_logic = dict(executed_retrieval_logic)
+    supplied_recreation = str((retrieval_logic or {}).get("recreation_summary") or "").strip()
+    if supplied_recreation:
+        merged_retrieval_logic["recreation_summary"] = supplied_recreation
+    merged_evidence_artifact = dict(executed_evidence_artifact)
+    if isinstance(evidence_artifact, dict):
+        for key, value in evidence_artifact.items():
+            if value not in ("", [], {}, None) and key not in merged_evidence_artifact:
+                merged_evidence_artifact[key] = value
+    return merged_retrieval_logic, merged_evidence_artifact
 
 
 def _retrieval_logic_has_narrow_step(value: Any) -> bool:
@@ -1434,6 +1608,89 @@ def _append_trace_event(conversation_id: str, payload: Dict[str, Any]) -> None:
     entry = {"ts": datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z"), **payload}
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(entry, ensure_ascii=False, sort_keys=True) + "\n")
+
+
+def _read_trace_events(conversation_id: str) -> List[Dict[str, Any]]:
+    path = _trace_file_path(conversation_id)
+    if not path.exists():
+        return []
+    events: List[Dict[str, Any]] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        text = line.strip()
+        if not text:
+            continue
+        try:
+            event = json.loads(text)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(event, dict):
+            events.append(event)
+    return events
+
+
+def _trace_tool_call_by_call_id(conversation_id: str) -> Dict[str, Dict[str, Any]]:
+    calls: Dict[str, Dict[str, Any]] = {}
+    for event in _read_trace_events(conversation_id):
+        if str(event.get("event") or "").strip() != "tool_called":
+            continue
+        call_id = str(event.get("call_id") or "").strip()
+        if not call_id:
+            continue
+        calls[call_id] = {
+            "call_id": call_id,
+            "tool_name": str(event.get("tool_name") or "").strip(),
+            "args": event.get("args") if isinstance(event.get("args"), dict) else {},
+            "transport": str(event.get("transport") or "").strip(),
+            "server_label": str(event.get("server_label") or "").strip(),
+        }
+    return calls
+
+
+def _trace_tool_call_for_artifact(conversation_id: str, artifact_id: str, expected_tool: str = "") -> Dict[str, Any]:
+    target = str(artifact_id or "").strip()
+    if not target:
+        return {}
+    clean_expected_tool = str(expected_tool or "").strip()
+    calls = _trace_tool_call_by_call_id(conversation_id)
+    for event in reversed(_read_trace_events(conversation_id)):
+        if str(event.get("event") or "").strip() != "artifact_registered":
+            continue
+        if str(event.get("artifact_id") or "").strip() != target:
+            continue
+        event_tool_name = str(event.get("tool_name") or "").strip()
+        if clean_expected_tool and event_tool_name != clean_expected_tool:
+            continue
+        call_id = str(event.get("call_id") or "").strip()
+        call = calls.get(call_id, {})
+        if call:
+            return call
+        return {
+            "call_id": call_id,
+            "tool_name": event_tool_name,
+            "args": {},
+        }
+    return {}
+
+
+def _trace_inspect_call_for_artifact(conversation_id: str, artifact_id: str) -> Dict[str, Any]:
+    target = str(artifact_id or "").strip()
+    if not target:
+        return {}
+    for event in reversed(_read_trace_events(conversation_id)):
+        if str(event.get("event") or "").strip() != "tool_called":
+            continue
+        if str(event.get("tool_name") or "").strip() != "inspect_artifact":
+            continue
+        args = event.get("args") if isinstance(event.get("args"), dict) else {}
+        if str(args.get("artifactId") or args.get("artifact_id") or "").strip() == target:
+            return {
+                "call_id": str(event.get("call_id") or "").strip(),
+                "tool_name": "inspect_artifact",
+                "args": args,
+                "transport": str(event.get("transport") or "").strip(),
+                "server_label": str(event.get("server_label") or "").strip(),
+            }
+    return {}
 
 
 def _looks_like_domestic_dataset(payload: Any) -> bool:
@@ -2069,12 +2326,12 @@ async def _generate_response_async(
         state.messages = fetch_project_chat_messages(
             user_id=resolved_user_id,
             project_id=resolved_project_id,
-            conversation_id=conversation_id,
         )
     run_dir = _ensure_runtime_dirs(conversation_id)
     run_artifact_start_index = len(state.artifacts)
     processed_tool_output_call_ids: set[str] = set()
     tool_call_names: Dict[str, str] = {}
+    tool_call_args_by_id: Dict[str, Dict[str, Any]] = {}
     tool_call_started_at: Dict[str, float] = {}
     last_status = ""
     saved_progress_messages: List[str] = []
@@ -2187,6 +2444,7 @@ async def _generate_response_async(
                     transport = _tool_transport(tool_name, item)
                     if call_id and tool_name:
                         tool_call_names[call_id] = tool_name
+                        tool_call_args_by_id[call_id] = tool_args
                         tool_call_started_at[call_id] = time.perf_counter()
                     logger.info(
                         "Tool call start cid=%s call_id=%s transport=%s tool=%s raw_type=%s server=%s args=%s",
@@ -2267,6 +2525,15 @@ async def _generate_response_async(
                         payload=output_payload,
                     )
                     if record:
+                        call_args = tool_call_args_by_id.get(call_id or "", {})
+                        if str(tool_name or "").strip() in {"retrieve", "narrow_artifact"} and (
+                            call_id or tool_name or call_args
+                        ):
+                            record["tool_call"] = {
+                                "call_id": call_id or "",
+                                "tool_name": tool_name or "",
+                                "args": call_args if isinstance(call_args, dict) else {},
+                            }
                         store.save(state)
                         _append_trace_event(
                             conversation_id,

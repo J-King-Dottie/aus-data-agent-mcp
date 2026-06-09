@@ -19,6 +19,10 @@ if [ -f .env ]; then
   set +a
 fi
 
+# Local Vite dev should use the configured /api proxy, matching dottie-ai-studio.
+# Keeping VITE_API_BASE_URL set makes browser requests go cross-origin to :5000.
+unset VITE_API_BASE_URL
+
 cd "$FRONTEND_DIR"
 
 if [ "$SKIP_INSTALL" != "1" ]; then

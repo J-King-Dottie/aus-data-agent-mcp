@@ -2645,13 +2645,12 @@ function App() {
     return payload;
   };
 
-  const loadStoredChatHistory = async (projectId: string, targetConversationId: string) => {
+  const loadStoredChatHistory = async (projectId: string) => {
     const { data, error: chatError } = await supabase
       .from("modelling_chat_messages")
-      .select("id,user_message,progress_notes,final_response,run_cost,run_index,status")
+      .select("id,user_message,progress_notes,final_response,run_cost,run_index,status,conversation_id,created_at")
       .eq("project_id", projectId)
-      .eq("conversation_id", targetConversationId)
-      .order("run_index", { ascending: true });
+      .order("created_at", { ascending: true });
     if (chatError) {
       console.error("Failed to load stored chat history", chatError);
       return [];
@@ -2837,7 +2836,7 @@ function App() {
 
     void (async () => {
       try {
-        const storedMessages = await loadStoredChatHistory(activeProjectId, conversationId);
+        const storedMessages = await loadStoredChatHistory(activeProjectId);
         if (!active) {
           return;
         }
@@ -3363,7 +3362,7 @@ function App() {
         }
 
         if (runStatus === "completed") {
-          const storedMessages = await loadStoredChatHistory(activeProjectId, conversationId);
+          const storedMessages = await loadStoredChatHistory(activeProjectId);
           if (storedMessages.length) {
             setMessages(storedMessages);
           } else {

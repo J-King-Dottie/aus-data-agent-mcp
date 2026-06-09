@@ -51,7 +51,7 @@ CONVERSATION_ID = str(os.getenv("NISABA_CONVERSATION_ID") or "standalone").strip
 CODE_CONTAINER_ID = str(os.getenv("NISABA_CODE_CONTAINER_ID") or "").strip()
 OPENAI_API_KEY = str(os.getenv("OPENAI_API_KEY") or "").strip()
 MAX_ANALYSIS_UPLOAD_BYTES = 5 * 1024 * 1024
-MAX_NARROW_ATTEMPTS_PER_ROOT_ARTIFACT = 3
+MAX_NARROW_ATTEMPTS_PER_ROOT_ARTIFACT = 6
 
 
 def _utc_timestamp() -> str:
@@ -293,6 +293,24 @@ def _fingerprint_narrow_request(request: Dict[str, Any]) -> str:
     return json.dumps(request, sort_keys=True, separators=(",", ":"))
 
 
+def _dimension_value_matches(value: Any, allowed: List[str]) -> bool:
+    if not allowed:
+        return True
+    allowed_values = {_clean_text(item).lower() for item in allowed if _clean_text(item)}
+    if not allowed_values:
+        return True
+    if isinstance(value, dict):
+        candidates = [
+            _clean_text(value.get("label")).lower(),
+            _clean_text(value.get("code")).lower(),
+            _clean_text(value.get("id")).lower(),
+        ]
+    else:
+        candidates = [_clean_text(value).lower()]
+    candidates = [candidate for candidate in candidates if candidate]
+    return bool(candidates) and any(candidate in allowed_values for candidate in candidates)
+
+
 def _begin_narrow_attempt(root_artifact_id: str, request: Dict[str, Any]) -> Dict[str, Any]:
     state = _load_narrow_attempt_state()
     root_state = state.setdefault(root_artifact_id, {"attempts": []})
@@ -313,7 +331,7 @@ def _begin_narrow_attempt(root_artifact_id: str, request: Dict[str, Any]) -> Dic
 
     if len(attempts) >= MAX_NARROW_ATTEMPTS_PER_ROOT_ARTIFACT:
         raise RuntimeError(
-            f"Too many distinct narrow attempts on artifact {root_artifact_id}. Choose another dataset, use the best current narrowed artifact, or ask the user a short clarification."
+            f"Too many distinct narrow attempts on artifact {root_artifact_id}. Inspect the artifact dimensions and retry with exact dimension codes/labels, choose another dataset, use the best current narrowed artifact, or ask the user a short clarification."
         )
 
     attempt_record = {
@@ -1610,8 +1628,7 @@ def narrow_artifact(
                 skip_series = False
                 for key, allowed in dimension_filters.items():
                     value = series_dims.get(key)
-                    label_value = _clean_text(value.get("label") if isinstance(value, dict) else value) or _clean_text(value.get("code") if isinstance(value, dict) else "")
-                    if label_value and label_value not in allowed:
+                    if not _dimension_value_matches(value, allowed):
                         skip_series = True
                         break
                 if skip_series:
@@ -1630,15 +1647,15 @@ def narrow_artifact(
                     matches_dims = True
                     for key, allowed in dimension_filters.items():
                         value = obs_dims.get(key, series_dims.get(key))
-                        label_value = _clean_text(value.get("label") if isinstance(value, dict) else value) or _clean_text(value.get("code") if isinstance(value, dict) else "")
-                        if label_value and label_value not in allowed:
+                        if not _dimension_value_matches(value, allowed):
                             matches_dims = False
                             break
                     if not matches_dims:
                         continue
                     time_value = _clean_text(
-                        observation.get("observationKey")
+                        (obs_dims.get("TIME_PERIOD") if isinstance(obs_dims.get("TIME_PERIOD"), dict) else {}).get("code")
                         or (obs_dims.get("TIME_PERIOD") if isinstance(obs_dims.get("TIME_PERIOD"), dict) else {}).get("label")
+                        or observation.get("observationKey")
                         or (obs_dims.get("TIME_PERIOD") if isinstance(obs_dims.get("TIME_PERIOD"), dict) else {}).get("code")
                     )
                     if (clean_start or clean_end) and not _matches_time_range(time_value, clean_start, clean_end):
