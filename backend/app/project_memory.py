@@ -370,7 +370,7 @@ def _compact_project_memory_with_model(
                     "Rewrite one concise memory for this project under the character limit. "
                     "Do not rely on downstream truncation: the memory_text you return must be complete, coherent, "
                     "and already within the limit. If there is too much to keep, prioritize durable instructions, "
-                    "decisions, open threads, useful project context, validated-variable intent, assumptions, "
+                    "decisions, open threads, useful project context, validated-variable intent, modelling judgement, "
                     "modelling choices, and unresolved tasks. Drop small talk, repeated wording, transient progress, "
                     "and anything not useful for future project chats."
                 ),

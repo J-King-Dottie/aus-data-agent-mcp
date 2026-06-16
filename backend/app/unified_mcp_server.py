@@ -61,7 +61,8 @@ def _utc_timestamp() -> str:
 def _mcp_instructions() -> str:
     return (
         "AusData MCP exposes public-data tools for catalog search, metadata inspection, "
-        "retrieval, artifact inspection, and artifact narrowing. Tool descriptions define call shapes."
+        "retrieval, artifact inspection, and artifact narrowing. Use it for source work only; "
+        "tool descriptions define local call contracts and sequencing."
     )
 
 
@@ -1115,7 +1116,11 @@ server = FastMCP(
     annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False),
 )
 def search_catalog(query: str = "", forceRefresh: bool = False) -> Dict[str, Any]:
-    """Search the unified catalog once for one variable candidate. Do not batch searches."""
+    """Search the unified catalogue for one public-data candidate.
+
+    Use source/data terms, not chatty paraphrases. Do not batch unrelated searches. Pass forceRefresh only
+    when the catalogue itself must be rebuilt.
+    """
     started_at = time.perf_counter()
     attempt_context = _begin_tool_attempt("search_catalog", "single", {"query": _clean_text(query), "forceRefresh": bool(forceRefresh)})
     logger.info("%stool=search_catalog event=start attempt=%s query=%r limit=%s refresh=%s", _cid_prefix(), attempt_context["attempt_number"], query[:160], 40, forceRefresh)
@@ -1144,7 +1149,11 @@ def get_metadata(
     query: str = "",
     forceRefresh: bool = False,
 ) -> Dict[str, Any]:
-    """Inspect metadata for one dataset candidate. For ABS, use returned anchor_candidates with retrieve(anchorType, anchorCode)."""
+    """Inspect metadata for one selected dataset candidate.
+
+    Use after search_catalog identifies a plausible dataset. For ABS, choose one returned anchor_candidate
+    and pass its anchorType and anchorCode to retrieve; do not invent data keys or filters.
+    """
     started_at = time.perf_counter()
     attempt_context = _begin_tool_attempt("get_metadata", datasetId, {"datasetId": _clean_text(datasetId), "query": _clean_text(query), "forceRefresh": bool(forceRefresh)})
     logger.info("%stool=get_metadata event=start attempt=%s datasetId=%r query=%r", _cid_prefix(), attempt_context["attempt_number"], datasetId[:160], query[:160])
@@ -1195,7 +1204,12 @@ def retrieve(
     frequencyCode: str = "",
     hsCodes: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
-    """Retrieve one source dataset/anchor and store a raw inspect-only artifact. For ABS, pass anchorType and anchorCode, not dataKey. Always inspect then narrow before analysis."""
+    """Retrieve one source dataset or ABS anchor and store a raw inspect-only artifact.
+
+    Use after selecting a dataset and, for ABS, one metadata anchor. For ABS pass anchorType and anchorCode,
+    not dataKey. The returned artifact is not analysis-ready: call inspect_artifact, then narrow_artifact
+    before python/code analysis or numeric claims.
+    """
     started_at = time.perf_counter()
     attempt_context = _begin_tool_attempt(
         "retrieve",
@@ -1294,7 +1308,12 @@ def retrieve(
     annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False),
 )
 def inspect_artifact(artifactId: str = "") -> Dict[str, Any]:
-    """Inspect one artifact structure. Raw retrieve artifacts are structure-only; use narrow_artifact before analysis."""
+    """Inspect one retrieved or narrowed artifact.
+
+    Use after retrieve to understand structure, dimensions, variants, and narrowing options. Raw retrieved
+    artifacts are structure-only; narrow them before analysis. If the result says use_directly_for_analysis,
+    it can be passed to python/code.
+    """
     started_at = time.perf_counter()
     clean_artifact_id = _clean_text(artifactId) or (_latest_artifact_id() or "")
     attempt_context = _begin_tool_attempt("inspect_artifact", clean_artifact_id or "latest", {"artifactId": clean_artifact_id or "latest"})
@@ -1462,7 +1481,12 @@ def narrow_artifact(
     seriesKeyContains: str = "",
     maxSeries: int = 4,
 ) -> Dict[str, Any]:
-    """Create one analysis-ready artifact by isolating the minimum exact slice for one variable. Do not batch narrowing."""
+    """Create one analysis-ready artifact by isolating the minimum exact slice for one variable.
+
+    Use after inspect_artifact. Keep only the intentional grain: one time series, sector comparison, region
+    comparison, or cross-tab. Do not batch multiple variables. The output is the approved compact slice for
+    analysis or validation.
+    """
     started_at = time.perf_counter()
     clean_artifact_id = _clean_text(artifactId) or (_latest_artifact_id() or "")
     logger.info("%stool=narrow_artifact event=start artifactId=%r", _cid_prefix(), clean_artifact_id[:160])

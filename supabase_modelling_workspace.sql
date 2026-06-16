@@ -16,7 +16,6 @@ drop table if exists public.model_exports cascade;
 drop table if exists public.model_runs cascade;
 drop table if exists public.model_edges cascade;
 drop table if exists public.model_nodes cascade;
-drop table if exists public.model_assumptions cascade;
 
 create table if not exists public.modelling_projects (
   id uuid primary key default gen_random_uuid(),
@@ -26,8 +25,8 @@ create table if not exists public.modelling_projects (
   status text not null default 'draft' check (status in ('draft', 'active', 'archived')),
   conversation_id text not null,
   model_builder_state jsonb not null default '{}'::jsonb,
-  model_assumptions jsonb not null default '[]'::jsonb,
   model_graph_state jsonb not null default '{"nodes":[],"edges":[]}'::jsonb,
+  node_data jsonb not null default '{}'::jsonb,
   active_validated_variable_ids jsonb not null default '[]'::jsonb,
   memory_text text not null default '',
   last_compacted_conversation_id text not null default '',
@@ -41,9 +40,29 @@ create table if not exists public.modelling_projects (
 alter table public.modelling_projects
   add column if not exists model_builder_state jsonb not null default '{}'::jsonb;
 
+do $$
+begin
+  if exists (
+    select 1
+    from information_schema.columns
+    where table_schema = 'public'
+      and table_name = 'modelling_projects'
+      and column_name = 'model_calculated_data'
+  )
+  and not exists (
+    select 1
+    from information_schema.columns
+    where table_schema = 'public'
+      and table_name = 'modelling_projects'
+      and column_name = 'node_data'
+  ) then
+    alter table public.modelling_projects rename column model_calculated_data to node_data;
+  end if;
+end $$;
+
 alter table public.modelling_projects
-  add column if not exists model_assumptions jsonb not null default '[]'::jsonb,
   add column if not exists model_graph_state jsonb not null default '{"nodes":[],"edges":[]}'::jsonb,
+  add column if not exists node_data jsonb not null default '{}'::jsonb,
   add column if not exists active_validated_variable_ids jsonb not null default '[]'::jsonb,
   add column if not exists memory_text text not null default '',
   add column if not exists last_compacted_conversation_id text not null default '',
@@ -53,14 +72,7 @@ alter table public.modelling_projects
 do $$
 begin
   update public.modelling_projects mp
-  set model_assumptions = '[]'::jsonb,
-      model_builder_state = jsonb_set(
-        coalesce(mp.model_builder_state, '{}'::jsonb),
-        '{assumptions}',
-        '[]'::jsonb,
-        true
-      ),
-      active_validated_variable_ids = '[]'::jsonb;
+  set active_validated_variable_ids = '[]'::jsonb;
 
   update public.modelling_projects mp
   set model_builder_state = jsonb_set(
@@ -233,11 +245,11 @@ create table if not exists public.validated_variables (
   period_end text not null default '',
   validation_status text not null default 'candidate' check (validation_status in ('candidate', 'validated', 'rejected')),
   validated_api_url text not null default '',
-  retrieval_logic jsonb not null default '{}'::jsonb,
-  transformation_logic jsonb not null default '{}'::jsonb,
   transform_summary text not null default '',
-  recreation_summary text not null default '',
-  evidence_artifact jsonb not null default '{}'::jsonb,
+  node_description text not null default '',
+  contents_summary text not null default '',
+  validated_data jsonb not null default '{}'::jsonb,
+  refresh_code text not null default '',
   approved_by uuid references auth.users(id) on delete set null,
   approved_at timestamptz,
   created_from_message_id uuid references public.modelling_chat_messages(id) on delete set null,
@@ -249,10 +261,24 @@ alter table public.validated_variables
   add column if not exists origin_project_id uuid;
 
 alter table public.validated_variables
-  add column if not exists recreation_summary text not null default '';
+  add column if not exists node_description text not null default '',
+  add column if not exists contents_summary text not null default '';
 
 alter table public.validated_variables
   add column if not exists validated_api_url text not null default '';
+
+alter table public.validated_variables
+  add column if not exists validated_data jsonb not null default '{}'::jsonb;
+
+alter table public.validated_variables
+  add column if not exists refresh_code text not null default '';
+
+alter table public.validated_variables
+  drop column if exists retrieval_logic,
+  drop column if exists transformation_logic,
+  drop column if exists refresh_metadata,
+  drop column if exists evidence_artifact,
+  drop column if exists recreation_summary;
 
 update public.validated_variables
 set origin_project_id = project_id

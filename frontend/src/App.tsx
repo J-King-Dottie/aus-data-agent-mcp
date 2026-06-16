@@ -1,7 +1,25 @@
-import { Fragment, type CSSProperties, type Dispatch, type FormEvent, type KeyboardEvent, type MouseEvent, type ReactNode, type SetStateAction, type WheelEvent } from "react";
-import { useEffect, useRef, useState } from "react";
+﻿import { Fragment, type CSSProperties, type Dispatch, type FormEvent, type KeyboardEvent, type MouseEvent, type ReactNode, type SetStateAction } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Session } from "@supabase/supabase-js";
+import {
+  Background,
+  BackgroundVariant,
+  BaseEdge,
+  Handle,
+  Position,
+  ReactFlow,
+  ReactFlowProvider,
+  applyNodeChanges,
+  getBezierPath,
+  useReactFlow,
+  type EdgeProps,
+  type NodeChange,
+  type NodeProps,
+  type Node as ReactFlowNode,
+  type Edge as ReactFlowEdge,
+} from "@xyflow/react";
 import ReactECharts from "echarts-for-react";
+import "@xyflow/react/dist/style.css";
 import "./index.css";
 import { supabase } from "./supabaseClient";
 
@@ -72,33 +90,21 @@ interface ValidatedVariable {
   geography: string;
   frequency: string;
   seasonalTreatment: string;
+  periodStart: string;
+  periodEnd: string;
   transformSummary: string;
+  nodeDescription?: string;
   contentsSummary?: string;
   contents?: Record<string, unknown>;
   validationStatus: "candidate" | "validated" | "rejected";
 }
 
-interface ModelAssumption {
-  id: string;
-  variableId?: string;
-  nodeId?: string;
-  label: string;
-  valueText: string;
-  method?: string;
-  inputs?: string[];
-  output?: string;
-  logicSummary?: string;
-  parameters?: Record<string, unknown>;
-  calculationLogic?: Record<string, unknown>;
-  calculationSpec?: Record<string, unknown>;
-}
-
 interface ModelNode {
   id: string;
-  label: string;
-  nodeType: "variable" | "assumption" | "calculation" | "result";
+  node_title: string;
+  node_description: string;
+  nodeType: "variable" | "calculation" | "result";
   variableId?: string;
-  assumptionId?: string;
   expression?: string;
   method?: string;
   inputs?: string[];
@@ -123,17 +129,47 @@ interface ModelEdge {
 
 interface ModelBuilderSpec {
   variables?: Array<Partial<ValidatedVariable>>;
-  assumptions?: Array<Partial<ModelAssumption> & { variable?: string }>;
   nodes?: Array<Partial<ModelNode>>;
   edges?: Array<Partial<ModelEdge> & { from?: string; to?: string }>;
+  node_data?: Record<string, unknown>;
 }
 
 interface ModelBuilderState {
   variables: ValidatedVariable[];
-  assumptions: ModelAssumption[];
   nodes: ModelNode[];
   edges: ModelEdge[];
+  node_data: Record<string, unknown>;
 }
+
+interface ModelNodeSize {
+  width: number;
+  height: number;
+}
+
+interface ModelNodeRenderMeta {
+  size: ModelNodeSize;
+  titleLines: string[];
+  noteLines: string[];
+  note: string;
+  noteSegments: Array<{ text: string; repeatedAssumption: boolean }>;
+  expanded: boolean;
+}
+
+type ModelFlowNodeData = {
+  modelNode: ModelNode;
+  meta: ModelNodeRenderMeta;
+  onToggleExpanded: (nodeId: string) => void;
+  onOpenChart: (nodeId: string) => void;
+  onHoverNode: (nodeId: string) => void;
+  onLeaveNode: (nodeId: string) => void;
+};
+
+type ModelFlowEdgeData = {
+  highlighted: boolean;
+};
+
+type ModelFlowNode = ReactFlowNode<ModelFlowNodeData, "modelNode">;
+type ModelFlowEdge = ReactFlowEdge<ModelFlowEdgeData, "modelEdge">;
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL || "").replace(/\/$/, "");
 const STORAGE_KEY = "abs-analyst-session";
@@ -147,7 +183,11 @@ const MAX_PROJECTS_PANE_WIDTH = 520;
 const MIN_WORKSPACE_PANE_WIDTH = 320;
 const DEFAULT_WORKSPACE_SPLIT_PERCENT = 50;
 const PROJECT_SELECT_COLUMNS =
-  "id,name,question,status,conversation_id,model_builder_state,model_assumptions,model_graph_state,active_validated_variable_ids,updated_at";
+  "id,name,question,status,conversation_id,model_builder_state,model_graph_state,node_data,active_validated_variable_ids,updated_at";
+const VALIDATED_VARIABLE_SELECT_COLUMNS =
+  "id,name,label,source_name,metric,unit,geography,frequency,seasonal_treatment,period_start,period_end,transform_summary,node_description,contents_summary,validation_status,validated_data";
+const VALIDATED_VARIABLE_LIBRARY_SELECT_COLUMNS =
+  "id,name,label,source_name,metric,unit,geography,frequency,seasonal_treatment,period_start,period_end,transform_summary,node_description,contents_summary,validation_status";
 const NISABA_THEME = {
   green: "#234233",
   umber: "#8f6a3a",
@@ -183,6 +223,8 @@ type ChartType = "line" | "bar" | "area" | "scatter" | "stacked_bar" | "stacked_
 interface ChartSeries {
   name: string;
   color?: string;
+  lineType?: "solid" | "dashed" | "dotted";
+  opacity?: number;
   points: ChartPoint[];
 }
 
@@ -193,6 +235,8 @@ interface ChartSpec {
   yLabel?: string;
   series: ChartSeries[];
 }
+
+type ModelNodeChartKind = "saved" | "calculated";
 
 type ContentBlock =
   | { type: "heading"; level: 1 | 2 | 3 | 4 | 5 | 6; text: string }
@@ -503,6 +547,18 @@ function ChartBlock({ spec }: { spec: ChartSpec }) {
     isBarLike && useHorizontalBars
       ? Math.max(360, xValues.length * 28 + 120)
       : 360;
+  const includeZeroAxisMin = (value: { min: number; max: number }) => {
+    if (value.min >= 0) {
+      return 0;
+    }
+    return undefined;
+  };
+  const includeZeroAxisMax = (value: { min: number; max: number }) => {
+    if (value.max <= 0) {
+      return 0;
+    }
+    return undefined;
+  };
 
   useEffect(() => {
     const element = containerRef.current;
@@ -579,6 +635,8 @@ function ChartBlock({ spec }: { spec: ChartSpec }) {
     xAxis: useHorizontalBars
       ? {
           type: "value",
+          min: includeZeroAxisMin,
+          max: includeZeroAxisMax,
           name: spec.xLabel,
           nameLocation: "middle",
           nameGap: spec.xLabel ? 36 : 0,
@@ -626,6 +684,8 @@ function ChartBlock({ spec }: { spec: ChartSpec }) {
           axisTick: {
             show: false,
           },
+          min: scatterNumericX ? includeZeroAxisMin : undefined,
+          max: scatterNumericX ? includeZeroAxisMax : undefined,
         },
     yAxis: useHorizontalBars
       ? {
@@ -671,10 +731,8 @@ function ChartBlock({ spec }: { spec: ChartSpec }) {
           axisTick: {
             show: false,
           },
-          min: (value: { min: number; max: number }) =>
-            value.min === value.max ? value.min - 1 : value.min - (value.max - value.min) * 0.08,
-          max: (value: { min: number; max: number }) =>
-            value.min === value.max ? value.max + 1 : value.max + (value.max - value.min) * 0.08,
+          min: includeZeroAxisMin,
+          max: includeZeroAxisMax,
         },
     series: spec.series.map((series) => {
       const data = isScatter && scatterNumericX
@@ -697,10 +755,13 @@ function ChartBlock({ spec }: { spec: ChartSpec }) {
         symbolSize: isScatter ? 9 : 6,
         lineStyle: {
           width: isScatter ? 0 : spec.series.length > 1 ? 2.4 : 2.8,
+          type: series.lineType || "solid",
+          opacity: series.opacity ?? 1,
         },
         areaStyle: isAreaLike ? { opacity: isStacked ? 0.82 : 0.18 } : undefined,
         itemStyle: {
           borderRadius: isBarLike ? [4, 4, 0, 0] : 0,
+          opacity: series.opacity ?? 1,
         },
         emphasis: {
           focus: "series",
@@ -1077,6 +1138,9 @@ function appendProgressMessage(
   content: string
 ) {
   setMessages((prev) => {
+    if (prev.some((message) => message.sender === "progress" && message.content === content)) {
+      return prev;
+    }
     const next = [...prev];
     const assistantIndex = next.findIndex((msg) => msg.id === assistantMessageId);
     const insertionIndex = assistantIndex === -1 ? next.length : assistantIndex;
@@ -1087,6 +1151,37 @@ function appendProgressMessage(
     });
     return next;
   });
+}
+
+function mergeProcessingMessages(
+  currentMessages: ChatMessage[],
+  backendMessages: ChatMessage[],
+  assistantMessageId: string
+) {
+  const base = backendMessages.length ? [...backendMessages] : [...currentMessages];
+  const progressContents = new Set(base.filter((message) => message.sender === "progress").map((message) => message.content));
+  const localProgress = currentMessages.filter(
+    (message) => message.sender === "progress" && !progressContents.has(message.content)
+  );
+  let merged = [...base];
+  const assistantIndex = merged.findIndex((message) => message.sender === "assistant");
+  const insertIndex = assistantIndex === -1 ? merged.length : assistantIndex;
+  if (localProgress.length) {
+    merged.splice(insertIndex, 0, ...localProgress);
+  }
+  if (!merged.some((message) => message.sender === "assistant")) {
+    merged.push({
+      id: assistantMessageId,
+      sender: "assistant",
+      content: "",
+    });
+  }
+  return merged;
+}
+
+function latestProgressContent(messages: ChatMessage[]) {
+  const progressMessages = messages.filter((message) => message.sender === "progress" && message.content.trim());
+  return progressMessages.length ? progressMessages[progressMessages.length - 1].content : "";
 }
 
 function isProgressSubtask(content: string) {
@@ -1126,8 +1221,192 @@ function toRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
 }
 
+function variablePeriodLabel(variable: Pick<ValidatedVariable, "periodStart" | "periodEnd">) {
+  if (variable.periodStart && variable.periodEnd) {
+    return variable.periodStart === variable.periodEnd
+      ? variable.periodStart
+      : `${variable.periodStart} to ${variable.periodEnd}`;
+  }
+  return variable.periodStart || variable.periodEnd || "";
+}
+
+function searchableVariableText(variable: ValidatedVariable) {
+  return [
+    variable.id,
+    variable.name,
+    variable.label,
+    variable.metric,
+    variable.sourceName,
+    variable.geography,
+    variable.frequency,
+    variable.seasonalTreatment,
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+function meaningfulTokens(value: string) {
+  const stopwords = new Set([
+    "abs",
+    "australia",
+    "australian",
+    "quarterly",
+    "annual",
+    "history",
+    "path",
+    "project",
+    "projection",
+    "to",
+    "from",
+    "the",
+    "and",
+    "of",
+    "total",
+  ]);
+  return value
+    .toLowerCase()
+    .replace(/other-res/g, "other residential")
+    .replace(/[^a-z0-9]+/g, " ")
+    .split(/\s+/)
+    .filter((token) => token.length > 2 && !stopwords.has(token));
+}
+
+function variableForModelNode(
+  node: ModelNode,
+  variables: ValidatedVariable[],
+  variableMap?: Map<string, ValidatedVariable>
+) {
+  if (node.nodeType !== "variable") {
+    return undefined;
+  }
+  const byId = variableMap || new Map(variables.map((variable) => [variable.id, variable]));
+  const explicit = byId.get(node.variableId || "") || byId.get(node.id);
+  if (explicit) {
+    return explicit;
+  }
+  const nodeTokens = meaningfulTokens([node.node_title, node.tooltip, node.node_description].filter(Boolean).join(" "));
+  if (!nodeTokens.length) {
+    return undefined;
+  }
+  const scored = variables
+    .map((variable) => {
+      const variableText = searchableVariableText(variable);
+      const score = nodeTokens.reduce((total, token) => total + (variableText.includes(token) ? 1 : 0), 0);
+      return { variable, score };
+    })
+    .filter((item) => item.score > 0)
+    .sort((left, right) => right.score - left.score);
+  if (!scored.length || (scored.length > 1 && scored[0].score === scored[1].score)) {
+    return undefined;
+  }
+  return scored[0].variable;
+}
+
+function chartPointFromUnknown(value: unknown): ChartPoint | null {
+  if (Array.isArray(value)) {
+    const x = toText(value[0]) || String(value[0] ?? "");
+    const y = Number(value[1]);
+    return x && Number.isFinite(y) ? { x, y } : null;
+  }
+  const record = toRecord(value);
+  if (!record) {
+    return null;
+  }
+  const x = toText(record.x) || toText(record.period) || toText(record.TIME_PERIOD) || String(record.x ?? record.period ?? "");
+  const rawY = record.y ?? record.value ?? record.OBS_VALUE;
+  const y = Number(rawY);
+  return x && Number.isFinite(y) ? { x, y } : null;
+}
+
+function pointsFromSavedCalculatedEntry(entry: Record<string, unknown>): ChartPoint[] {
+  const points = Array.isArray(entry.points) ? entry.points : [];
+  if (points.length) {
+    return points.map(chartPointFromUnknown).filter((point): point is ChartPoint => Boolean(point));
+  }
+  const columns = Array.isArray(entry.columns) ? entry.columns.map((item) => toText(item)).filter(Boolean) : ["period", "value"];
+  const records = Array.isArray(entry.records) ? entry.records : [];
+  const periodIndex = Math.max(0, columns.findIndex((column) => /time|period|date|quarter|year/i.test(column)));
+  const valueIndex = Math.max(0, columns.findIndex((column) => ["value", "y", "obs_value"].includes(column.toLowerCase())));
+  return records
+    .map((record) => {
+      if (!Array.isArray(record)) {
+        return chartPointFromUnknown(record);
+      }
+      const x = toText(record[periodIndex]) || String(record[periodIndex] ?? "");
+      const y = Number(record[valueIndex]);
+      return x && Number.isFinite(y) ? { x, y } : null;
+    })
+    .filter((point): point is ChartPoint => Boolean(point));
+}
+
+function seriesFromSavedNodeDataEntry(entry: Record<string, unknown>, fallbackTitle: string): ChartSeries[] {
+  const series = Array.isArray(entry.series) ? entry.series : [];
+  const parsedSeries = series
+    .map((item, index): ChartSeries | null => {
+      const record = toRecord(item);
+      if (!record) {
+        return null;
+      }
+      const points = Array.isArray(record.points)
+        ? record.points.map(chartPointFromUnknown).filter((point): point is ChartPoint => Boolean(point))
+        : [];
+      if (!points.length) {
+        return null;
+      }
+      return {
+        name: toText(record.name) || toText(record.label) || `Series ${index + 1}`,
+        color: [NISABA_THEME.rust, NISABA_THEME.umber, NISABA_THEME.secondaryGreen, NISABA_THEME.green][index % 4],
+        points,
+      };
+    })
+    .filter((item): item is ChartSeries => Boolean(item));
+  if (parsedSeries.length) {
+    return parsedSeries;
+  }
+  const points = pointsFromSavedCalculatedEntry(entry);
+  return points.length
+    ? [
+        {
+          name: toText(entry.node_title) || fallbackTitle,
+          color: NISABA_THEME.rust,
+          points,
+        },
+      ]
+    : [];
+}
+
+function savedChartSpecForNode(
+  node: ModelNode,
+  node_data: Record<string, unknown>
+): { chartSpec: ChartSpec; dataKind: ModelNodeChartKind; title: string } | null {
+  const entry = toRecord(node_data[node.id]);
+  if (!entry) {
+    return null;
+  }
+  const title = toText(entry.node_title) || node.node_title;
+  const series = seriesFromSavedNodeDataEntry(entry, title);
+  if (!series.length) {
+    return null;
+  }
+  const dataKind: ModelNodeChartKind = toText(entry.data_kind) === "saved" ? "saved" : "calculated";
+  return {
+    title,
+    dataKind,
+    chartSpec: {
+      type: "line",
+      title,
+      xLabel: "Period",
+      yLabel: toText(entry.unit) || "Value",
+      series,
+    },
+  };
+}
+
 function createEmptyModelBuilderState(): ModelBuilderState {
-  return { variables: [], assumptions: [], nodes: [], edges: [] };
+  return { variables: [], nodes: [], edges: [], node_data: {} };
 }
 
 function parseModelBuilderState(value: unknown): ModelBuilderState {
@@ -1139,15 +1418,14 @@ function parseModelBuilderState(value: unknown): ModelBuilderState {
 
 function parseProjectModelBuilderState(row: Record<string, unknown>): ModelBuilderState {
   const legacyState = parseModelBuilderState(row.model_builder_state);
-  const assumptionsState = parseModelBuilderState({ assumptions: row.model_assumptions });
   const graphState = parseModelBuilderState(row.model_graph_state);
-  const hasAssumptionsColumn = Array.isArray(row.model_assumptions);
   const hasGraphColumn = Boolean(row.model_graph_state && typeof row.model_graph_state === "object");
+  const nodes = hasGraphColumn ? graphState.nodes : legacyState.nodes;
   return {
     variables: legacyState.variables,
-    assumptions: hasAssumptionsColumn ? assumptionsState.assumptions : legacyState.assumptions,
-    nodes: hasGraphColumn ? graphState.nodes : legacyState.nodes,
+    nodes,
     edges: hasGraphColumn ? graphState.edges : legacyState.edges,
+    node_data: toRecord(row.node_data) || {},
   };
 }
 
@@ -1155,6 +1433,50 @@ function toModelGraphState(state: ModelBuilderState) {
   return {
     nodes: state.nodes,
     edges: state.edges,
+  };
+}
+
+function modelStateWithoutVariable(state: ModelBuilderState, variableId: string): ModelBuilderState {
+  const removedNodeIds = new Set(
+    state.nodes
+      .filter((node) => node.variableId === variableId || node.id === variableId)
+      .map((node) => node.id)
+  );
+  const nextNodeData = Object.fromEntries(
+    Object.entries(state.node_data || {}).filter(([nodeId]) => !removedNodeIds.has(nodeId))
+  );
+  return {
+    variables: state.variables.filter((variable) => variable.id !== variableId),
+    nodes: state.nodes.filter((node) => !removedNodeIds.has(node.id)),
+    edges: state.edges.filter(
+      (edge) => !removedNodeIds.has(edge.sourceNodeId) && !removedNodeIds.has(edge.targetNodeId)
+    ),
+    node_data: nextNodeData,
+  };
+}
+
+function modelStateWithVariable(state: ModelBuilderState, variable: ValidatedVariable): ModelBuilderState {
+  const variables = state.variables.some((item) => item.id === variable.id)
+    ? state.variables
+    : [...state.variables, variable];
+  const hasNode = state.nodes.some((node) => node.variableId === variable.id || node.id === variable.id);
+  if (hasNode) {
+    return { ...state, variables };
+  }
+  const existingVariableNodes = state.nodes.filter((node) => node.nodeType === "variable").length;
+  const node: ModelNode = {
+    id: variable.id,
+    node_title: variable.label || variable.name,
+    node_description: variable.nodeDescription || "",
+    nodeType: "variable",
+    variableId: variable.id,
+    positionX: 80 + (existingVariableNodes % 2) * 390,
+    positionY: 80 + Math.floor(existingVariableNodes / 2) * 210,
+  };
+  return {
+    ...state,
+    variables,
+    nodes: [...state.nodes, node],
   };
 }
 
@@ -1180,8 +1502,8 @@ function projectInsertPayload(userId: string, draft: ModellingProject) {
     conversation_id: draft.conversationId,
     model_builder_state: draft.modelBuilderState,
     active_validated_variable_ids: draft.activeValidatedVariableIds,
-    model_assumptions: draft.modelBuilderState.assumptions,
     model_graph_state: toModelGraphState(draft.modelBuilderState),
+    node_data: draft.modelBuilderState.node_data || {},
   };
 }
 
@@ -1198,7 +1520,6 @@ async function updateProjectModelBuilderState(projectId: string, nextState: Mode
     .from("modelling_projects")
     .update({
       model_builder_state: nextState,
-      model_assumptions: nextState.assumptions,
       model_graph_state: toModelGraphState(nextState),
       updated_at: new Date().toISOString(),
     })
@@ -1207,9 +1528,9 @@ async function updateProjectModelBuilderState(projectId: string, nextState: Mode
 
 function mapVariableRow(row: Record<string, unknown>): ValidatedVariable {
   const status = toText(row.validation_status);
-  const evidenceArtifact = toRecord(row.evidence_artifact);
-  const contents = toRecord(evidenceArtifact?.contents);
-  const contentsSummary = toText(row.contentsSummary) || toText(row.contents_summary) || toText(evidenceArtifact?.contents_summary);
+  const validatedData = toRecord(row.validated_data);
+  const contents = validatedData;
+  const contentsSummary = toText(row.contentsSummary) || toText(row.contents_summary);
   return {
     id: toText(row.id) || createConversationId(),
     name: toText(row.name) || toText(row.label) || "variable",
@@ -1220,7 +1541,14 @@ function mapVariableRow(row: Record<string, unknown>): ValidatedVariable {
     geography: toText(row.geography),
     frequency: toText(row.frequency),
     seasonalTreatment: toText(row.seasonal_treatment),
+    periodStart: toText(row.period_start),
+    periodEnd: toText(row.period_end),
     transformSummary: toText(row.transform_summary),
+    nodeDescription:
+      toText(row.nodeDescription) ||
+      toText(row.node_description) ||
+      toText(contents?.node_description) ||
+      undefined,
     contentsSummary: contentsSummary || undefined,
     contents: contents || undefined,
     validationStatus: status === "validated" ? "validated" : status === "rejected" ? "rejected" : "candidate",
@@ -1245,54 +1573,39 @@ function normalizeModelSpec(spec: ModelBuilderSpec | null): ModelBuilderState | 
       geography: toText(variable.geography),
       frequency: toText(variable.frequency),
       seasonalTreatment: toText(variable.seasonalTreatment),
+      periodStart: toText(variable.periodStart) || toText((variable as Record<string, unknown>).period_start),
+      periodEnd: toText(variable.periodEnd) || toText((variable as Record<string, unknown>).period_end),
       transformSummary: toText(variable.transformSummary),
+      nodeDescription: toText((variable as Record<string, unknown>).nodeDescription) || toText((variable as Record<string, unknown>).node_description) || undefined,
       contentsSummary: toText(variable.contentsSummary) || undefined,
       contents: toRecord(variable.contents) || undefined,
       validationStatus: status === "candidate" || status === "rejected" ? status : "validated",
     };
   });
 
-  const assumptions = (spec.assumptions || [])
-    .map((assumption, index): ModelAssumption => {
-      const raw = assumption as Record<string, unknown>;
-      return {
-        id: toText(assumption.id) || `assumption-${index + 1}`,
-        variableId: toText(assumption.variableId) || toText(assumption.variable) || undefined,
-        nodeId: toText(raw.nodeId) || toText(raw.node_id) || toText(raw.calculationNodeId) || undefined,
-        label: toText(assumption.label) || "Assumption",
-        valueText: toText(assumption.valueText),
-        method: toText(raw.method) || undefined,
-        inputs: toTextArray(raw.inputs),
-        output: toText(raw.output) || undefined,
-        logicSummary: toText(raw.logicSummary) || toText(raw.logic_summary) || undefined,
-        parameters: toRecord(raw.parameters) || undefined,
-        calculationLogic: toRecord(raw.calculationLogic) || toRecord(raw.calculation_logic) || undefined,
-        calculationSpec: toRecord(raw.calculationSpec) || toRecord(raw.calculation_spec) || undefined,
-      };
-    });
-
   const nodes = (spec.nodes || []).map((node, index): ModelNode => {
     const id = toText(node.id) || `node-${index + 1}`;
     const nodeType = toText(node.nodeType);
+    const raw = node as Record<string, unknown>;
     return {
       id,
-      label: toText(node.label) || id,
+      node_title: toText(raw.node_title) || id,
+      node_description: toText(raw.node_description),
       nodeType:
-        nodeType === "assumption" || nodeType === "calculation" || nodeType === "result"
+        nodeType === "calculation" || nodeType === "result"
           ? nodeType
           : "variable",
       variableId: toText(node.variableId) || undefined,
-      assumptionId: toText((node as Record<string, unknown>).assumptionId) || toText((node as Record<string, unknown>).assumption_id) || undefined,
       expression: toText(node.expression) || undefined,
-      method: toText((node as Record<string, unknown>).method) || undefined,
-      inputs: toTextArray((node as Record<string, unknown>).inputs),
-      output: toText((node as Record<string, unknown>).output) || undefined,
-      sourceCalculationId: toText((node as Record<string, unknown>).sourceCalculationId) || toText((node as Record<string, unknown>).source_calculation_id) || undefined,
-      logicSummary: toText((node as Record<string, unknown>).logicSummary) || toText((node as Record<string, unknown>).logic_summary) || undefined,
-      tooltip: toText((node as Record<string, unknown>).tooltip) || undefined,
-      parameters: toRecord((node as Record<string, unknown>).parameters) || undefined,
-      calculationLogic: toRecord((node as Record<string, unknown>).calculationLogic) || toRecord((node as Record<string, unknown>).calculation_logic) || undefined,
-      calculationSpec: toRecord((node as Record<string, unknown>).calculationSpec) || toRecord((node as Record<string, unknown>).calculation_spec) || undefined,
+      method: toText(raw.method) || undefined,
+      inputs: toTextArray(raw.inputs),
+      output: toText(raw.output) || undefined,
+      sourceCalculationId: toText(raw.sourceCalculationId) || toText(raw.source_calculation_id) || undefined,
+      logicSummary: toText(raw.logicSummary) || toText(raw.logic_summary) || undefined,
+      tooltip: toText(raw.tooltip) || undefined,
+      parameters: toRecord(raw.parameters) || undefined,
+      calculationLogic: toRecord(raw.calculationLogic) || toRecord(raw.calculation_logic) || undefined,
+      calculationSpec: toRecord(raw.calculationSpec) || toRecord(raw.calculation_spec) || undefined,
       positionX: Number.isFinite(Number(node.positionX)) ? Number(node.positionX) : undefined,
       positionY: Number.isFinite(Number(node.positionY)) ? Number(node.positionY) : undefined,
     };
@@ -1315,58 +1628,45 @@ function normalizeModelSpec(spec: ModelBuilderSpec | null): ModelBuilderState | 
     ];
   });
 
-  const graph = withOperationNodes(nodes, edges);
-  return { variables, assumptions, nodes: graph.nodes, edges: graph.edges };
+  return {
+    variables,
+    nodes,
+    edges,
+    node_data: toRecord(spec.node_data) || {},
+  };
 }
 
 function buildFallbackGraph(variables: ValidatedVariable[]): { nodes: ModelNode[]; edges: ModelEdge[] } {
   if (variables.length === 0) {
-    return {
-      nodes: [
-        { id: "variable-1", label: "Variable 1", nodeType: "variable", positionX: 24, positionY: 72 },
-        { id: "variable-2", label: "Variable 2", nodeType: "variable", positionX: 24, positionY: 152 },
-        { id: "operation-multiply-model-result", label: "×", nodeType: "calculation", expression: "×", positionX: 220, positionY: 112 },
-        { id: "model-result", label: "Model output", nodeType: "result", positionX: 360, positionY: 112 },
-      ],
-      edges: [
-        { id: "variable-1-multiply", sourceNodeId: "variable-1", targetNodeId: "operation-multiply-model-result" },
-        { id: "variable-2-multiply", sourceNodeId: "variable-2", targetNodeId: "operation-multiply-model-result" },
-        { id: "multiply-result", sourceNodeId: "operation-multiply-model-result", targetNodeId: "model-result" },
-      ],
-    };
+    return { nodes: [], edges: [] };
   }
 
   const inputNodes = variables.slice(0, 5).map((variable, index): ModelNode => ({
     id: variable.id,
-    label: variable.name,
+    node_title: variable.name,
+    node_description: variable.nodeDescription || "",
     nodeType: "variable",
     variableId: variable.id,
     positionX: 24,
     positionY: 28 + index * 72,
   }));
-  const resultNode = { id: "model-result", label: "Result", nodeType: "result" as const, positionX: 360, positionY: 72 };
-  const operationNode = {
-    id: "operation-add-model-result",
-    label: variables.length > 1 ? "+" : "=",
+  const resultNode = {
+    id: "model-result",
+    node_title: "Result",
+    node_description: "",
     nodeType: "calculation" as const,
-    expression: variables.length > 1 ? "+" : "=",
-    positionX: 220,
+    expression: variables.length > 1 ? "+" : "",
+    inputs: inputNodes.map((node) => node.id),
+    positionX: 360,
     positionY: 72,
   };
   return {
-    nodes: [...inputNodes, operationNode, resultNode],
-    edges: [
-      ...inputNodes.map((node) => ({
-        id: `${node.id}-${operationNode.id}`,
-        sourceNodeId: node.id,
-        targetNodeId: operationNode.id,
-      })),
-      {
-        id: `${operationNode.id}-result`,
-        sourceNodeId: operationNode.id,
-        targetNodeId: resultNode.id,
-      },
-    ],
+    nodes: [...inputNodes, resultNode],
+    edges: inputNodes.map((node) => ({
+      id: `${node.id}-${resultNode.id}`,
+      sourceNodeId: node.id,
+      targetNodeId: resultNode.id,
+    })),
   };
 }
 
@@ -1393,19 +1693,22 @@ function ProductTitle() {
                 </svg>
                 <div className="header-tooltip info-tooltip" role="tooltip">
                   <p>
-                    Nisaba is named for the Sumerian keeper of writing, records,
-                    grain accounts, and measured knowledge.
+                    In Sumerian mythology, Nisaba was the goddess of writing,
+                    accounting, and the keeping of records.
                   </p>
                   <p>
-                    In this workspace, that myth becomes a practical rule:
-                    every useful metric should be recorded, validated, and
-                    reproducible before it becomes part of a model.
+                    Writing emerged in Mesopotamian bureaucracies to count what
+                    mattered. Grain, livestock, labour, taxes.
                   </p>
                   <p>
-                    Nisaba uses the AusData MCP for Australian official data and
-                    global macro context, then saves projects, chat history,
-                    validated variables, assumptions, model structure, runs, and
-                    exports as linked modelling records.
+                    This system does the same. Designed for Australian analysts,
+                    it combines detailed domestic data with global macro sources.
+                  </p>
+                  <p>
+                    Nisaba is not a general chatbot. It is a data discovery,
+                    retrieval, and analysis workflow. Use Claude or ChatGPT for
+                    broad research. Use Nisaba when you want actual data, from
+                    the actual source.
                   </p>
                   <p>
                     Produced by{" "}
@@ -1415,11 +1718,11 @@ function ProductTitle() {
                     {" · "}
                     open source{" "}
                     <a
-                      href="https://github.com/J-King-Dottie/ausdata-ai-harness"
+                      href="https://github.com/J-King-Dottie/aus-data-agent-mcp"
                       target="_blank"
                       rel="noreferrer"
                     >
-                      Nisaba/AusData MCP
+                      J-King-Dottie/aus-data-agent-mcp
                     </a>
                   </p>
                   <div className="info-tooltip-summary">
@@ -1669,281 +1972,74 @@ function ProjectsPane({
   );
 }
 
-function modelNodeSize(node: ModelNode) {
-  if (node.nodeType === "calculation") {
-    if (isCustomCalculationNode(node)) {
-      return { width: 96, height: 34 };
-    }
-    return { width: 40, height: 40 };
+function modelNodeSize(node: ModelNode, renderMeta?: Map<string, ModelNodeRenderMeta>): ModelNodeSize {
+  const metaSize = renderMeta?.get(node.id)?.size;
+  if (metaSize) {
+    return metaSize;
   }
-  return { width: 122, height: 42 };
+  return { width: 260, height: 160 };
+}
+
+function modelNodeDynamicSize(titleLineCount: number, noteLineCount: number, expanded: boolean): ModelNodeSize {
+  const verticalPadding = 12;
+  const titleHeight = Math.max(1, titleLineCount) * 21;
+  if (!expanded || noteLineCount === 0) {
+    return { width: 260, height: Math.max(58, verticalPadding * 2 + titleHeight) };
+  }
+  const noteHeight = Math.max(1, noteLineCount) * 16;
+  return { width: 260, height: Math.max(118, verticalPadding * 2 + titleHeight + 12 + noteHeight) };
 }
 
 function isCustomCalculationNode(node: ModelNode) {
-  return node.nodeType === "calculation" && Boolean(node.assumptionId || node.method || node.expression === "custom");
+  return node.nodeType === "calculation" && Boolean(node.method || node.expression === "custom");
 }
 
-function mathSymbol(value: string) {
-  const normalized = value.trim().toLowerCase();
-  if (!normalized) {
-    return "";
+function descriptionForNode(node: ModelNode, variables: ValidatedVariable[]) {
+  if (node.node_description) {
+    return node.node_description;
   }
-  if (["divide", "division", "denominator", "/", "÷"].includes(normalized)) {
-    return "÷";
-  }
-  if (["multiply", "multiplication", "product", "*", "x", "×"].includes(normalized)) {
-    return "×";
-  }
-  if (["add", "addition", "sum", "plus", "+"].includes(normalized)) {
-    return "+";
-  }
-  if (["subtract", "minus", "difference", "-", "−"].includes(normalized)) {
-    return "−";
-  }
-  if (["equals", "result", "="].includes(normalized)) {
-    return "=";
-  }
-  if (["numerator", "input"].includes(normalized)) {
-    return "";
-  }
-  return value;
+  const variable = variableForModelNode(node, variables);
+  return variable?.nodeDescription || "";
 }
 
-function mathEdgeLabel(edge: ModelEdge) {
-  const value = edge.label || edge.operator || "";
-  return mathSymbol(value);
-}
-
-function nonEqualsMathEdgeLabel(edge: ModelEdge) {
-  const label = mathEdgeLabel(edge);
-  return label === "=" ? "" : label;
-}
-
-function mathNodeLabel(node: ModelNode) {
-  const value = `${node.label || ""} ${node.expression || ""}`.trim().toLowerCase();
-  if (!value) {
-    return "";
-  }
-  if (value.includes("divide") || value.includes("division") || value.includes("ratio") || value.includes("÷") || value.includes("/")) {
-    return "÷";
-  }
-  if (value.includes("multiply") || value.includes("multiplication") || value.includes("product") || value.includes("×") || value.includes("*")) {
-    return "×";
-  }
-  if (value.includes("add") || value.includes("sum") || value.includes("plus") || value.includes("+")) {
-    return "+";
-  }
-  if (value.includes("subtract") || value.includes("minus") || value.includes("difference") || value.includes("−") || value.includes("-")) {
-    return "−";
-  }
-  if (value.includes("equals") || value.includes("=")) {
-    return "=";
-  }
-  return "";
-}
-
-function compactJson(value: unknown) {
-  if (!value || typeof value !== "object") {
-    return "";
-  }
-  const entries = Object.entries(value as Record<string, unknown>)
-    .filter(([, item]) => item !== undefined && item !== null && item !== "")
-    .slice(0, 5)
-    .map(([key, item]) => `${key}: ${Array.isArray(item) ? item.join(", ") : String(item)}`);
-  return entries.join("; ");
-}
-
-function calculationReplaySummary(value: unknown) {
-  const spec = toRecord(value);
-  const replay = toRecord(spec?.replay);
-  return toText(replay?.formula) || toText(replay?.code) || "";
-}
-
-function labelForNodeId(nodeId: string, nodeMap: Map<string, ModelNode>, variables: ValidatedVariable[]) {
-  const node = nodeMap.get(nodeId);
-  if (!node) {
-    return nodeId;
-  }
-  const variable = variables.find((item) => item.id === (node.variableId || node.id));
-  return variable?.label || variable?.name || node.label || node.id;
-}
-
-function modelNodeTooltip(
-  node: ModelNode,
-  nodeMap: Map<string, ModelNode>,
-  variables: ValidatedVariable[],
-  assumptions: ModelAssumption[]
-) {
-  const variable = variables.find((item) => item.id === (node.variableId || node.id));
-  const assumption = assumptions.find((item) => item.id === node.assumptionId || item.nodeId === node.id);
-  if (variable) {
-    return [
-      variable.label || variable.name,
-      variable.contentsSummary || [variable.sourceName, variable.metric, variable.geography, variable.frequency, variable.unit].filter(Boolean).join(" · "),
-      variable.transformSummary,
-    ].filter(Boolean).join("\n");
-  }
-  if (assumption || node.assumptionId) {
-    const inputLabels = (node.inputs || assumption?.inputs || []).map((id) => labelForNodeId(id, nodeMap, variables)).join(", ");
-    const replaySummary = calculationReplaySummary(node.calculationSpec || assumption?.calculationSpec);
-    return [
-      assumption?.valueText || node.logicSummary || node.tooltip || node.label,
-      node.method || assumption?.method ? `Method: ${node.method || assumption?.method}` : "",
-      inputLabels ? `Inputs: ${inputLabels}` : "",
-      node.output || assumption?.output ? `Output: ${node.output || assumption?.output}` : "",
-      replaySummary ? `Replay: ${replaySummary}` : "",
-      compactJson(node.parameters || assumption?.parameters),
-    ].filter(Boolean).join("\n");
-  }
-  if (node.nodeType === "calculation") {
-    const inputLabels = (node.inputs || []).map((id) => labelForNodeId(id, nodeMap, variables)).join(", ");
-    return [
-      node.label,
-      node.expression ? `Operation: ${node.expression}` : "",
-      inputLabels ? `Inputs: ${inputLabels}` : "",
-    ].filter(Boolean).join("\n");
-  }
-  if (node.nodeType === "result") {
-    return [node.label, node.logicSummary || node.tooltip || "Model output"].filter(Boolean).join("\n");
-  }
-  return node.tooltip || node.label;
-}
-
-function operationIdFor(targetNodeId: string, symbol: string) {
-  const operationName =
-    symbol === "÷" ? "divide" : symbol === "×" ? "multiply" : symbol === "+" ? "add" : symbol === "−" ? "subtract" : "operation";
-  return `operation-${operationName}-${targetNodeId}`.replace(/[^a-zA-Z0-9_-]+/g, "-");
-}
-
-function clearEdgeMath(edge: ModelEdge): ModelEdge {
-  return { ...edge, operator: undefined, label: undefined };
-}
-
-function withOperationNodes(nodes: ModelNode[], edges: ModelEdge[]): { nodes: ModelNode[]; edges: ModelEdge[] } {
-  const nodeMap = new Map(nodes.map((node) => [node.id, node]));
-  const nextNodes = [...nodes];
-  const nextEdges: ModelEdge[] = [];
-  const operationGroups = new Map<
-    string,
-    {
-      id: string;
-      symbol: string;
-      targetNodeId: string;
-      sourceNodeIds: string[];
-      sourceEdges: ModelEdge[];
-    }
-  >();
-
-  edges.forEach((edge) => {
-    const symbol = nonEqualsMathEdgeLabel(edge);
-    const source = nodeMap.get(edge.sourceNodeId);
-    const target = nodeMap.get(edge.targetNodeId);
-    if (!symbol || !source || !target || source.nodeType === "calculation" || target.nodeType === "calculation") {
-      nextEdges.push(clearEdgeMath(edge));
-      return;
-    }
-
-    const operationNodeId = operationIdFor(edge.targetNodeId, symbol);
-    const groupKey = `${operationNodeId}:${edge.targetNodeId}`;
-    const group =
-      operationGroups.get(groupKey) ||
-      {
-        id: operationNodeId,
-        symbol,
-        targetNodeId: edge.targetNodeId,
-        sourceNodeIds: [],
-        sourceEdges: [],
-      };
-    group.sourceNodeIds.push(edge.sourceNodeId);
-    group.sourceEdges.push(edge);
-    operationGroups.set(groupKey, group);
-  });
-
-  operationGroups.forEach((group) => {
-    const target = nodeMap.get(group.targetNodeId);
-    if (!target) {
-      return;
-    }
-    const sourceNodes = group.sourceNodeIds.flatMap((sourceNodeId) => {
-      const source = nodeMap.get(sourceNodeId);
-      return source ? [source] : [];
+function wrapNoteLines(value: string, maxChars: number, maxLines?: number) {
+  const words = value
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .flatMap((word) => {
+      if (word.length <= maxChars) {
+        return [word];
+      }
+      const chunks: string[] = [];
+      for (let index = 0; index < word.length; index += maxChars) {
+        chunks.push(word.slice(index, index + maxChars));
+      }
+      return chunks;
     });
-    const averageSourceX =
-      sourceNodes.reduce((total, node) => total + Number(node.positionX ?? 0), 0) / Math.max(1, sourceNodes.length);
-    const averageSourceY =
-      sourceNodes.reduce((total, node) => total + Number(node.positionY ?? 0), 0) / Math.max(1, sourceNodes.length);
-    const operationNode: ModelNode = nodeMap.get(group.id) || {
-      id: group.id,
-      label: group.symbol,
-      nodeType: "calculation",
-      expression: group.symbol,
-      positionX: Math.round(((averageSourceX || 24) + Number(target.positionX ?? 300)) / 2),
-      positionY: Math.round(averageSourceY || Number(target.positionY ?? 90)),
-    };
-    if (!nodeMap.has(group.id)) {
-      nodeMap.set(group.id, operationNode);
-      nextNodes.push(operationNode);
+  const lines: string[] = [];
+  let current = "";
+  for (const word of words) {
+    const next = current ? `${current} ${word}` : word;
+    if (next.length <= maxChars) {
+      current = next;
+      continue;
     }
-    group.sourceEdges.forEach((edge, index) => {
-      nextEdges.push({
-        id: `${edge.id || `${edge.sourceNodeId}-${group.id}`}-input-${index}`,
-        sourceNodeId: edge.sourceNodeId,
-        targetNodeId: group.id,
-      });
-    });
-    nextEdges.push({
-      id: `${group.id}-${group.targetNodeId}`,
-      sourceNodeId: group.id,
-      targetNodeId: group.targetNodeId,
-    });
-  });
-
-  return { nodes: nextNodes, edges: repairLegacyOperationBypassEdges(nextNodes, nextEdges) };
-}
-
-function repairLegacyOperationBypassEdges(nodes: ModelNode[], edges: ModelEdge[]): ModelEdge[] {
-  const nodeMap = new Map(nodes.map((node) => [node.id, node]));
-  const operationToResult = edges.filter((edge) => {
-    const source = nodeMap.get(edge.sourceNodeId);
-    const target = nodeMap.get(edge.targetNodeId);
-    return source?.nodeType === "calculation" && target?.nodeType === "result";
-  });
-  if (!operationToResult.length) {
-    return edges;
+    if (current) {
+      lines.push(current);
+    }
+    current = word;
+    if (maxLines && lines.length >= maxLines) {
+      break;
+    }
   }
-
-  const rewiredEdges: ModelEdge[] = [];
-  edges.forEach((edge) => {
-    const source = nodeMap.get(edge.sourceNodeId);
-    const target = nodeMap.get(edge.targetNodeId);
-    if (!source || target?.nodeType !== "result") {
-      rewiredEdges.push(edge);
-      return;
-    }
-    if (source.nodeType === "calculation") {
-      rewiredEdges.push(edge);
-      return;
-    }
-    const matchingOperationEdge = operationToResult.find((candidate) => candidate.targetNodeId === edge.targetNodeId);
-    if (!matchingOperationEdge) {
-      rewiredEdges.push(edge);
-      return;
-    }
-    const alreadyFeedsOperation = edges.some(
-      (candidate) =>
-        candidate.sourceNodeId === edge.sourceNodeId &&
-        candidate.targetNodeId === matchingOperationEdge.sourceNodeId
-    );
-    if (alreadyFeedsOperation) {
-      return;
-    }
-    rewiredEdges.push({
-      id: `${edge.id || `${edge.sourceNodeId}-${matchingOperationEdge.sourceNodeId}`}-rewired`,
-      sourceNodeId: edge.sourceNodeId,
-      targetNodeId: matchingOperationEdge.sourceNodeId,
-    });
-  });
-  return rewiredEdges;
+  if (current && (!maxLines || lines.length < maxLines)) {
+    lines.push(current);
+  }
+  if (maxLines && lines.length === maxLines && words.join(" ").length > lines.join(" ").length) {
+    lines[maxLines - 1] = truncateNodeLabel(lines[maxLines - 1], maxChars);
+  }
+  return lines;
 }
 
 function truncateNodeLabel(value: string, maxLength = 34) {
@@ -1951,12 +2047,145 @@ function truncateNodeLabel(value: string, maxLength = 34) {
   return text.length <= maxLength ? text : `${text.slice(0, maxLength - 1).trim()}…`;
 }
 
+function noteSentences(value: string) {
+  return value
+    .replace(/\s+/g, " ")
+    .trim()
+    .match(/[^.!?]+[.!?]+|[^.!?]+$/g)
+    ?.map((sentence) => sentence.trim())
+    .filter(Boolean) || [];
+}
+
+function repeatedAssumptionSentences(notes: string[]) {
+  const counts = new Map<string, number>();
+  notes.forEach((note) => {
+    const seenInNote = new Set<string>();
+    noteSentences(note).forEach((sentence) => {
+      const normalized = sentence.toLowerCase();
+      if (!/\bassumes?\b/.test(normalized) || seenInNote.has(normalized)) {
+        return;
+      }
+      seenInNote.add(normalized);
+      counts.set(normalized, (counts.get(normalized) || 0) + 1);
+    });
+  });
+  return new Set([...counts.entries()].filter(([, count]) => count > 1).map(([sentence]) => sentence));
+}
+
+function noteSegments(value: string, repeatedAssumptions: Set<string>) {
+  const sentences = noteSentences(value);
+  if (!sentences.length) {
+    return [{ text: value, repeatedAssumption: false }];
+  }
+  return sentences.map((sentence, index) => ({
+    text: `${index > 0 ? " " : ""}${sentence}`,
+    repeatedAssumption: repeatedAssumptions.has(sentence.toLowerCase()),
+  }));
+}
+
 function positionedNodes(nodes: ModelNode[]): ModelNode[] {
   return nodes.map((node, index) => ({
     ...node,
-    positionX: Number.isFinite(Number(node.positionX)) ? Number(node.positionX) : 28 + (index % 2) * 172,
-    positionY: Number.isFinite(Number(node.positionY)) ? Number(node.positionY) : 28 + Math.floor(index / 2) * 82,
+    positionX: Number.isFinite(Number(node.positionX)) ? Number(node.positionX) : 72 + (index % 2) * 280,
+    positionY: Number.isFinite(Number(node.positionY)) ? Number(node.positionY) : 32 + Math.floor(index / 2) * 168,
   }));
+}
+
+function layoutModelNodes(
+  nodes: ModelNode[],
+  edges: ModelEdge[],
+  renderMeta?: Map<string, ModelNodeRenderMeta>
+): ModelNode[] {
+  const baseNodes = positionedNodes(nodes);
+  const nodeMap = new Map(baseNodes.map((node) => [node.id, node]));
+  const incoming = new Map<string, ModelEdge[]>();
+  const outgoing = new Map<string, ModelEdge[]>();
+  const indegree = new Map(baseNodes.map((node) => [node.id, 0]));
+  edges.forEach((edge) => {
+    if (!nodeMap.has(edge.sourceNodeId) || !nodeMap.has(edge.targetNodeId)) {
+      return;
+    }
+    incoming.set(edge.targetNodeId, [...(incoming.get(edge.targetNodeId) || []), edge]);
+    outgoing.set(edge.sourceNodeId, [...(outgoing.get(edge.sourceNodeId) || []), edge]);
+    indegree.set(edge.targetNodeId, (indegree.get(edge.targetNodeId) || 0) + 1);
+  });
+
+  const rank = new Map(baseNodes.map((node) => [node.id, 0]));
+  const queue = baseNodes.filter((node) => (indegree.get(node.id) || 0) === 0);
+  const visited = new Set<string>();
+  while (queue.length) {
+    const node = queue.shift();
+    if (!node || visited.has(node.id)) {
+      continue;
+    }
+    visited.add(node.id);
+    (outgoing.get(node.id) || []).forEach((edge) => {
+      rank.set(edge.targetNodeId, Math.max(rank.get(edge.targetNodeId) || 0, (rank.get(node.id) || 0) + 1));
+      const nextIndegree = (indegree.get(edge.targetNodeId) || 0) - 1;
+      indegree.set(edge.targetNodeId, nextIndegree);
+      if (nextIndegree === 0) {
+        const target = nodeMap.get(edge.targetNodeId);
+        if (target) {
+          queue.push(target);
+        }
+      }
+    });
+  }
+
+  baseNodes.forEach((node, index) => {
+    if (!visited.has(node.id)) {
+      rank.set(node.id, Math.max(rank.get(node.id) || 0, Math.floor(index / 2)));
+    }
+  });
+
+  const ranks = new Map<number, ModelNode[]>();
+  baseNodes.forEach((node) => {
+    const nodeRank = rank.get(node.id) || 0;
+    ranks.set(nodeRank, [...(ranks.get(nodeRank) || []), node]);
+  });
+
+  const rowGap = 92;
+  const columnGap = 340;
+  const top = 40;
+  const centerX = 430;
+  const rankHeights = new Map<number, number>();
+  ranks.forEach((rankNodes, nodeRank) => {
+    rankHeights.set(
+      nodeRank,
+      Math.max(...rankNodes.map((node) => modelNodeSize(node, renderMeta).height))
+    );
+  });
+  const rankY = new Map<number, number>();
+  [...ranks.keys()]
+    .sort((a, b) => a - b)
+    .forEach((nodeRank, index, sortedRanks) => {
+      if (index === 0) {
+        rankY.set(nodeRank, top);
+        return;
+      }
+      const previousRank = sortedRanks[index - 1];
+      rankY.set(nodeRank, (rankY.get(previousRank) || top) + (rankHeights.get(previousRank) || 0) + rowGap);
+    });
+  const positioned = new Map<string, ModelNode>();
+  [...ranks.entries()]
+    .sort(([a], [b]) => a - b)
+    .forEach(([nodeRank, rankNodes]) => {
+      const orderedNodes = [...rankNodes].sort((a, b) => {
+        const typeOrder = { variable: 0, calculation: 1, result: 2 };
+        return typeOrder[a.nodeType] - typeOrder[b.nodeType] || (a.positionX ?? 0) - (b.positionX ?? 0);
+      });
+      const rowWidth = (orderedNodes.length - 1) * columnGap;
+      orderedNodes.forEach((node, index) => {
+        const size = modelNodeSize(node, renderMeta);
+        positioned.set(node.id, {
+          ...node,
+          positionX: Math.round(centerX - rowWidth / 2 + index * columnGap - size.width / 2),
+          positionY: rankY.get(nodeRank) || top,
+        });
+      });
+    });
+
+  return baseNodes.map((node) => positioned.get(node.id) || node);
 }
 
 function visibleModelGraph(nodes: ModelNode[], edges: ModelEdge[]) {
@@ -1965,570 +2194,593 @@ function visibleModelGraph(nodes: ModelNode[], edges: ModelEdge[]) {
 
   return {
     nodes: allNodes,
-    edges: edges
-      .filter((edge) => visibleIds.has(edge.sourceNodeId) && visibleIds.has(edge.targetNodeId))
-      .map((edge) => clearEdgeMath(edge)),
+    edges: edges.filter((edge) => visibleIds.has(edge.sourceNodeId) && visibleIds.has(edge.targetNodeId)),
   };
 }
 
-interface ModelPoint {
-  x: number;
-  y: number;
-}
-
-interface ModelRect {
-  x1: number;
-  y1: number;
-  x2: number;
-  y2: number;
-}
-
-function expandedNodeRect(node: ModelNode, padding = 12): ModelRect {
-  const size = modelNodeSize(node);
-  const x = node.positionX ?? 0;
-  const y = node.positionY ?? 0;
-  return {
-    x1: x - padding,
-    y1: y - padding,
-    x2: x + size.width + padding,
-    y2: y + size.height + padding,
-  };
-}
-
-function segmentIntersectsRect(a: ModelPoint, b: ModelPoint, rect: ModelRect) {
-  const minX = Math.min(a.x, b.x);
-  const maxX = Math.max(a.x, b.x);
-  const minY = Math.min(a.y, b.y);
-  const maxY = Math.max(a.y, b.y);
-  if (a.y === b.y) {
-    return a.y >= rect.y1 && a.y <= rect.y2 && maxX >= rect.x1 && minX <= rect.x2;
+function reactFlowHandleForSide(side: "left" | "right" | "top" | "bottom") {
+  if (side === "left") {
+    return Position.Left;
   }
-  if (a.x === b.x) {
-    return a.x >= rect.x1 && a.x <= rect.x2 && maxY >= rect.y1 && minY <= rect.y2;
+  if (side === "right") {
+    return Position.Right;
   }
-  return false;
+  if (side === "top") {
+    return Position.Top;
+  }
+  return Position.Bottom;
 }
 
-function pathCrossesAnyNode(points: ModelPoint[], obstacles: ModelRect[]) {
-  return points.slice(0, -1).some((point, index) =>
-    obstacles.some((rect) => segmentIntersectsRect(point, points[index + 1], rect))
+function handlePairForModelEdge(source: ModelNode, target: ModelNode) {
+  const dy = (target.positionY ?? 0) - (source.positionY ?? 0);
+  return dy >= 0
+    ? { sourceHandle: "bottom", targetHandle: "top" }
+    : { sourceHandle: "top", targetHandle: "bottom" };
+}
+
+function modelFlowNodeClass(node: ModelNode, meta: ModelNodeRenderMeta) {
+  return `model-node model-node-${node.nodeType}${isCustomCalculationNode(node) ? " model-node-custom-calculation" : ""}${meta.note ? " model-node-collapsible" : ""}${meta.expanded ? " expanded" : " collapsed"}`;
+}
+
+function ModelFlowNodeView({ data }: NodeProps<ModelFlowNode>) {
+  const { modelNode: node, meta, onToggleExpanded, onOpenChart, onHoverNode, onLeaveNode } = data;
+  const handleSides: Array<"top" | "right" | "bottom" | "left"> = ["top", "right", "bottom", "left"];
+  return (
+    <div
+      className={modelFlowNodeClass(node, meta)}
+      style={{ width: meta.size.width, height: meta.size.height }}
+      role={meta.note ? "button" : undefined}
+      tabIndex={0}
+      aria-expanded={meta.note ? meta.expanded : undefined}
+      onClick={(event) => {
+        event.stopPropagation();
+        onToggleExpanded(node.id);
+      }}
+      onKeyDown={(event) => {
+        if ((event.key === "Enter" || event.key === " ") && meta.note) {
+          event.preventDefault();
+          onToggleExpanded(node.id);
+        }
+      }}
+      onMouseEnter={() => onHoverNode(node.id)}
+      onMouseLeave={() => onLeaveNode(node.id)}
+    >
+      {handleSides.map((side) => (
+        <Fragment key={side}>
+          <Handle
+            id={side}
+            type="source"
+            position={reactFlowHandleForSide(side)}
+            className={`model-node-handle model-node-handle-${side}`}
+          />
+          <Handle
+            id={side}
+            type="target"
+            position={reactFlowHandleForSide(side)}
+            className={`model-node-handle model-node-handle-${side}`}
+          />
+        </Fragment>
+      ))}
+      <div className="model-node-card-text">
+        <div className="model-node-card-title">
+          <span>{node.node_title}</span>
+          <button
+            type="button"
+            className="model-node-chart-button"
+            aria-label={`Show chart for ${node.node_title}`}
+            title="Show chart preview"
+            onPointerDown={(event) => {
+              event.stopPropagation();
+            }}
+            onClick={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              onOpenChart(node.id);
+            }}
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M4 19h16" />
+              <path d="M7 16V9" />
+              <path d="M12 16V5" />
+              <path d="M17 16v-4" />
+            </svg>
+          </button>
+        </div>
+        {meta.expanded && meta.note ? (
+          <div className="model-node-card-note">
+            {meta.noteSegments.map((segment, index) => (
+              <span
+                key={`${node.id}-note-${index}`}
+                className={segment.repeatedAssumption ? "model-node-repeated-assumption" : undefined}
+              >
+                {segment.text}
+              </span>
+            ))}
+          </div>
+        ) : null}
+      </div>
+    </div>
   );
 }
 
-function pathLength(points: ModelPoint[]) {
-  return points.slice(0, -1).reduce((total, point, index) => {
-    const next = points[index + 1];
-    return total + Math.abs(next.x - point.x) + Math.abs(next.y - point.y);
+function ModelFlowEdgeView({
+  id,
+  sourceX,
+  sourceY,
+  targetX,
+  targetY,
+  sourcePosition,
+  targetPosition,
+  data,
+}: EdgeProps<ModelFlowEdge>) {
+  const [path] = getBezierPath({
+    sourceX,
+    sourceY,
+    sourcePosition,
+    targetX,
+    targetY,
+    targetPosition,
+    curvature: 0.22,
+  });
+  return (
+    <BaseEdge
+      id={id}
+      path={path}
+      className={`model-edge-main${data?.highlighted ? " highlighted" : ""}`}
+    />
+  );
+}
+
+const MODEL_FLOW_NODE_TYPES = { modelNode: ModelFlowNodeView };
+const MODEL_FLOW_EDGE_TYPES = { modelEdge: ModelFlowEdgeView };
+
+function fitModelFlowView(
+  fitView: (options: { padding: number; duration: number; minZoom: number; maxZoom: number }) => void | Promise<boolean>
+) {
+  window.setTimeout(() => {
+    fitView({ padding: 0.22, duration: 260, minZoom: 0.18, maxZoom: 1.15 });
   }, 0);
 }
 
-function labelPointForPath(points: ModelPoint[]) {
-  const total = pathLength(points);
-  let travelled = 0;
-  for (let index = 0; index < points.length - 1; index += 1) {
-    const current = points[index];
-    const next = points[index + 1];
-    const length = Math.abs(next.x - current.x) + Math.abs(next.y - current.y);
-    if (travelled + length >= total / 2) {
-      const remaining = total / 2 - travelled;
-      const directionX = Math.sign(next.x - current.x);
-      const directionY = Math.sign(next.y - current.y);
-      return {
-        x: current.x + directionX * remaining,
-        y: current.y + directionY * remaining,
-      };
-    }
-    travelled += length;
-  }
-  return points[Math.max(0, Math.floor(points.length / 2))];
-}
-
-function pointsToPath(points: ModelPoint[]) {
-  return points
-    .map((point, index) => `${index === 0 ? "M" : "L"} ${point.x} ${point.y}`)
-    .join(" ");
-}
-
-function routeModelEdge(
-  source: ModelNode,
-  target: ModelNode,
-  allNodes: ModelNode[],
-  edgeIndex: number,
-  allEdges: ModelEdge[] = []
+function buildModelRenderMeta(
+  graphNodes: ModelNode[],
+  variables: ValidatedVariable[],
+  collapsedNodeIds: Record<string, boolean>
 ) {
-  const sourceSize = modelNodeSize(source);
-  const targetSize = modelNodeSize(target);
-  const sourceX = source.positionX ?? 0;
-  const sourceY = source.positionY ?? 0;
-  const targetX = target.positionX ?? 0;
-  const targetY = target.positionY ?? 0;
-  const sourceCenter = { x: sourceX + sourceSize.width / 2, y: sourceY + sourceSize.height / 2 };
-  const targetCenter = { x: targetX + targetSize.width / 2, y: targetY + targetSize.height / 2 };
-  const dx = targetCenter.x - sourceCenter.x;
-  const dy = targetCenter.y - sourceCenter.y;
-  const obstacles = allNodes
-    .filter((node) => node.id !== source.id && node.id !== target.id)
-    .map((node) => expandedNodeRect(node));
-  const laneSpread = ((edgeIndex % 5) - 2) * 10;
-  const centerAlignedY = Math.abs(sourceCenter.y - targetCenter.y) < 3;
-  if (Math.abs(dx) >= Math.abs(dy) && centerAlignedY && sourceX + sourceSize.width <= targetX) {
-    const points = [
-      { x: sourceX + sourceSize.width, y: sourceCenter.y },
-      { x: targetX, y: targetCenter.y },
-    ];
-    const labelPoint = labelPointForPath(points);
-    return { path: pointsToPath(points), labelX: labelPoint.x, labelY: labelPoint.y };
-  }
-
-  if (target.nodeType === "calculation" && Math.abs(dx) >= Math.abs(dy)) {
-    const incomingEdges = allEdges.filter((edge) => edge.targetNodeId === target.id);
-    const incomingSources = incomingEdges
-      .flatMap((edge) => {
-        const node = allNodes.find((candidate) => candidate.id === edge.sourceNodeId);
-        return node && node.id !== target.id ? [node] : [];
-      })
-      .filter((node) => node.nodeType !== "calculation");
-    const sourcesOnLeft = incomingSources.filter((node) => {
-      const size = modelNodeSize(node);
-      return (node.positionX ?? 0) + size.width <= targetX;
-    });
-    if (sourcesOnLeft.length >= 2 && sourceX + sourceSize.width <= targetX) {
-      const nearestRight = Math.max(...sourcesOnLeft.map((node) => (node.positionX ?? 0) + modelNodeSize(node).width));
-      const trunkX = Math.round((nearestRight + targetX) / 2);
-      const start = { x: sourceX + sourceSize.width, y: sourceCenter.y };
-      const end = { x: targetX, y: targetCenter.y };
-      const points = [
-        start,
-        { x: trunkX, y: start.y },
-        { x: trunkX, y: end.y },
-        end,
+  const notesByNode = new Map(graphNodes.map((node) => [node.id, descriptionForNode(node, variables)]));
+  const repeatedAssumptions = repeatedAssumptionSentences([...notesByNode.values()]);
+  return new Map<string, ModelNodeRenderMeta>(
+    graphNodes.map((node) => {
+      const note = notesByNode.get(node.id) || "";
+      const titleLines = wrapNoteLines(node.node_title, 28, 2);
+      const expanded = Boolean(note) && !collapsedNodeIds[node.id];
+      const noteLines = expanded ? wrapNoteLines(note, 42) : [];
+      return [
+        node.id,
+        {
+          size: modelNodeDynamicSize(titleLines.length || 1, noteLines.length, expanded),
+          titleLines,
+          noteLines,
+          note,
+          noteSegments: noteSegments(note, repeatedAssumptions),
+          expanded,
+        },
       ];
-      const labelPoint = labelPointForPath(points);
-      return { path: pointsToPath(points), labelX: labelPoint.x, labelY: labelPoint.y };
-    }
-  }
-
-  if (Math.abs(dx) >= Math.abs(dy)) {
-    const exitsRight = dx >= 0;
-    const start = {
-      x: sourceX + (exitsRight ? sourceSize.width : 0),
-      y: sourceCenter.y,
-    };
-    const end = {
-      x: targetX + (exitsRight ? 0 : targetSize.width),
-      y: targetCenter.y,
-    };
-    const middle = (start.x + end.x) / 2 + laneSpread;
-    const direction = exitsRight ? 1 : -1;
-    const candidates = [
-      middle,
-      start.x + direction * 46,
-      end.x - direction * 46,
-      ...obstacles.flatMap((rect) => [rect.x1 - direction * 18, rect.x2 + direction * 18]),
-    ];
-    const best = candidates
-      .map((laneX) => ({
-        laneX,
-        points: [
-          start,
-          { x: laneX, y: start.y },
-          { x: laneX, y: end.y },
-          end,
-        ],
-      }))
-      .sort((a, b) => {
-        const aCrosses = pathCrossesAnyNode(a.points, obstacles) ? 1 : 0;
-        const bCrosses = pathCrossesAnyNode(b.points, obstacles) ? 1 : 0;
-        return aCrosses - bCrosses || pathLength(a.points) - pathLength(b.points);
-      })[0];
-    const labelPoint = labelPointForPath(best.points);
-    return { path: pointsToPath(best.points), labelX: labelPoint.x, labelY: labelPoint.y };
-  }
-
-  const exitsDown = dy >= 0;
-  const start = {
-    x: sourceCenter.x,
-    y: sourceY + (exitsDown ? sourceSize.height : 0),
-  };
-  const end = {
-    x: targetCenter.x,
-    y: targetY + (exitsDown ? 0 : targetSize.height),
-  };
-  const middle = (start.y + end.y) / 2 + laneSpread;
-  const direction = exitsDown ? 1 : -1;
-  const candidates = [
-    middle,
-    start.y + direction * 46,
-    end.y - direction * 46,
-    ...obstacles.flatMap((rect) => [rect.y1 - direction * 18, rect.y2 + direction * 18]),
-  ];
-  const best = candidates
-    .map((laneY) => ({
-      laneY,
-      points: [
-        start,
-        { x: start.x, y: laneY },
-        { x: end.x, y: laneY },
-        end,
-      ],
-    }))
-    .sort((a, b) => {
-      const aCrosses = pathCrossesAnyNode(a.points, obstacles) ? 1 : 0;
-      const bCrosses = pathCrossesAnyNode(b.points, obstacles) ? 1 : 0;
-      return aCrosses - bCrosses || pathLength(a.points) - pathLength(b.points);
-    })[0];
-  const labelPoint = labelPointForPath(best.points);
-  return { path: pointsToPath(best.points), labelX: labelPoint.x, labelY: labelPoint.y };
-}
-
-function centeredModelViewport(nodes: ModelNode[], canvasWidth: number, canvasHeight: number) {
-  if (!nodes.length) {
-    return { zoom: 1, panX: 0, panY: 0 };
-  }
-  const bounds = nodes.reduce(
-    (acc, node) => {
-      const size = modelNodeSize(node);
-      const x = node.positionX ?? 0;
-      const y = node.positionY ?? 0;
-      return {
-        minX: Math.min(acc.minX, x),
-        minY: Math.min(acc.minY, y),
-        maxX: Math.max(acc.maxX, x + size.width),
-        maxY: Math.max(acc.maxY, y + size.height),
-      };
-    },
-    { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity }
+    })
   );
-  const graphCenterX = (bounds.minX + bounds.maxX) / 2;
-  const graphCenterY = (bounds.minY + bounds.maxY) / 2;
-  return {
-    zoom: 1,
-    panX: Math.round(canvasWidth / 2 - graphCenterX),
-    panY: Math.round(canvasHeight / 2 - graphCenterY),
-  };
 }
 
-function ModelFlowDiagram({
+function ModelNodeChartModal({
+  node,
+  node_data,
+  onClose,
+}: {
+  node: ModelNode;
+  node_data: Record<string, unknown>;
+  onClose: () => void;
+}) {
+  useEffect(() => {
+    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") {
+        onClose();
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [onClose]);
+
+  const savedChart = savedChartSpecForNode(node, node_data);
+  const chartSpec = savedChart?.chartSpec || null;
+  const dataKind = savedChart?.dataKind || (node.nodeType === "variable" ? "saved" : "calculated");
+  const title = savedChart?.title || node.node_title;
+
+  return (
+    <div className="variable-chart-overlay" role="presentation" onMouseDown={onClose}>
+      <section
+        className="variable-chart-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-label={`${title} chart`}
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <div className="variable-chart-modal-header">
+          <div>
+            <h3>{title}</h3>
+            <p>
+              <span className={`variable-chart-kind variable-chart-kind-${dataKind}`}>
+                {dataKind === "saved" ? "Saved source data" : "Calculated preview"}
+              </span>
+            </p>
+          </div>
+          <button type="button" className="variable-chart-close" aria-label="Close chart" onClick={onClose}>
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M6 6l12 12M18 6 6 18" />
+            </svg>
+          </button>
+        </div>
+        {chartSpec ? (
+          <div>
+            <ChartBlock spec={chartSpec} />
+          </div>
+        ) : (
+          <div className="variable-chart-empty">No saved chart data found for this node.</div>
+        )}
+        <div className="variable-chart-footer">
+          {dataKind === "saved"
+            ? "Saved data · not refreshed from source"
+            : "Saved calculated data · refresh only from chat when requested"}
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function ModelFlowDiagram(props: {
+  nodes: ModelNode[];
+  edges: ModelEdge[];
+  variables: ValidatedVariable[];
+  node_data: Record<string, unknown>;
+  onMoveNode: (nodeId: string, position: { x: number; y: number }) => void;
+  onLayoutNodes: (nodes: ModelNode[]) => void;
+}) {
+  return (
+    <ReactFlowProvider>
+      <ModelFlowDiagramInner {...props} />
+    </ReactFlowProvider>
+  );
+}
+
+function ModelFlowDiagramInner({
   nodes,
   edges,
   variables,
-  assumptions,
+  node_data,
   onMoveNode,
+  onLayoutNodes,
 }: {
   nodes: ModelNode[];
   edges: ModelEdge[];
   variables: ValidatedVariable[];
-  assumptions: ModelAssumption[];
+  node_data: Record<string, unknown>;
   onMoveNode: (nodeId: string, position: { x: number; y: number }) => void;
+  onLayoutNodes: (nodes: ModelNode[]) => void;
 }) {
-  const canvasWidth = 560;
-  const canvasHeight = 420;
-  const svgRef = useRef<SVGSVGElement | null>(null);
-  const [dragState, setDragState] = useState<{
-    nodeId: string;
-    offsetX: number;
-    offsetY: number;
-  } | null>(null);
-  const [panState, setPanState] = useState<{ startX: number; startY: number; panX: number; panY: number } | null>(null);
-  const [viewport, setViewport] = useState({ zoom: 1, panX: 0, panY: 0 });
+  const [collapsedNodeIds, setCollapsedNodeIds] = useState<Record<string, boolean>>({});
+  const [chartNodeId, setChartNodeId] = useState("");
+  const [hoveredNodeId, setHoveredNodeId] = useState("");
+  const [flowNodes, setFlowNodes] = useState<ModelFlowNode[]>([]);
   const lastCenteredGraphRef = useRef("");
-  const gridSize = 20;
-  const graph = visibleModelGraph(nodes, edges);
+  const { fitView } = useReactFlow<ModelFlowNode, ModelFlowEdge>();
+  const graph = useMemo(() => visibleModelGraph(nodes, edges), [nodes, edges]);
   const graphNodes = graph.nodes;
   const graphEdges = graph.edges;
-  const nodeMap = new Map(graphNodes.map((node) => [node.id, node]));
+  const nodeMap = useMemo(() => new Map(graphNodes.map((node) => [node.id, node])), [graphNodes]);
+  const chartNode = chartNodeId ? nodeMap.get(chartNodeId) : undefined;
+  const renderMeta = useMemo(
+    () => buildModelRenderMeta(graphNodes, variables, collapsedNodeIds),
+    [collapsedNodeIds, graphNodes, variables]
+  );
   const graphViewportKey = graphNodes
-    .map((node) => `${node.id}:${node.positionX ?? 0}:${node.positionY ?? 0}`)
+    .map((node) => node.id)
+    .join("|")
+    + "::"
+    + graphEdges.map((edge) => `${edge.sourceNodeId}->${edge.targetNodeId}`).join("|");
+  const nodeLayoutKey = graphNodes
+    .map((node) => `${node.id}:${node.positionX ?? 0}:${node.positionY ?? 0}:${renderMeta.get(node.id)?.expanded ? "e" : "c"}`)
     .join("|");
 
-  useEffect(() => {
-    if (lastCenteredGraphRef.current === graphViewportKey) {
+  const toggleNodeExpanded = useCallback((nodeId: string) => {
+    const meta = renderMeta.get(nodeId);
+    if (!meta?.note) {
       return;
     }
-    lastCenteredGraphRef.current = graphViewportKey;
-    if (dragState || panState) {
-      return;
-    }
-    setViewport(centeredModelViewport(graphNodes, canvasWidth, canvasHeight));
-  }, [graphViewportKey]);
-
-  const pointFromEvent = (event: { clientX: number; clientY: number }) => {
-    const svg = svgRef.current;
-    if (!svg) {
-      return { x: 0, y: 0 };
-    }
-    const rect = svg.getBoundingClientRect();
-    return {
-      x: ((event.clientX - rect.left) / rect.width) * canvasWidth,
-      y: ((event.clientY - rect.top) / rect.height) * canvasHeight,
-    };
-  };
-
-  const worldPointFromEvent = (event: MouseEvent<SVGSVGElement> | MouseEvent<SVGGElement>) => {
-    const svg = svgRef.current;
-    if (!svg) {
-      return { x: 0, y: 0 };
-    }
-    const rect = svg.getBoundingClientRect();
-    const point = {
-      x: ((event.clientX - rect.left) / rect.width) * canvasWidth,
-      y: ((event.clientY - rect.top) / rect.height) * canvasHeight,
-    };
-    return {
-      x: (point.x - viewport.panX) / viewport.zoom,
-      y: (point.y - viewport.panY) / viewport.zoom,
-    };
-  };
-
-  const beginDrag = (event: MouseEvent<SVGGElement>, node: ModelNode) => {
-    if (event.button !== 0) {
-      return;
-    }
-    event.preventDefault();
-    event.stopPropagation();
-    const point = worldPointFromEvent(event);
-    setDragState({
-      nodeId: node.id,
-      offsetX: point.x - (node.positionX ?? 0),
-      offsetY: point.y - (node.positionY ?? 0),
-    });
-  };
-
-  const moveDrag = (event: MouseEvent<SVGSVGElement>) => {
-    if (!dragState) {
-      return;
-    }
-    event.preventDefault();
-    const node = nodeMap.get(dragState.nodeId);
-    if (!node) {
-      return;
-    }
-    const size = modelNodeSize(node);
-    const point = worldPointFromEvent(event);
-    const nextX = Math.round((point.x - dragState.offsetX) / gridSize) * gridSize;
-    const nextY = Math.round((point.y - dragState.offsetY) / gridSize) * gridSize;
-    onMoveNode(dragState.nodeId, {
-      x: Math.max(-240, Math.min(960 - size.width, nextX)),
-      y: Math.max(-180, Math.min(720 - size.height, nextY)),
-    });
-  };
-
-  const beginPan = (event: MouseEvent<SVGSVGElement>) => {
-    if (event.button !== 1) {
-      return;
-    }
-    event.preventDefault();
-    setPanState({
-      startX: event.clientX,
-      startY: event.clientY,
-      panX: viewport.panX,
-      panY: viewport.panY,
-    });
-  };
-
-  const movePan = (event: MouseEvent<SVGSVGElement>) => {
-    if (!panState || dragState) {
-      return;
-    }
-    event.preventDefault();
-    setViewport((prev) => ({
+    setCollapsedNodeIds((prev) => ({
       ...prev,
-      panX: panState.panX + event.clientX - panState.startX,
-      panY: panState.panY + event.clientY - panState.startY,
+      [nodeId]: !prev[nodeId],
     }));
-  };
+  }, [renderMeta]);
 
-  const endDrag = () => {
-    setDragState(null);
-    setPanState(null);
-  };
+  const openNodeChart = useCallback((nodeId: string) => {
+    setChartNodeId(nodeId);
+  }, []);
 
-  const zoomCanvas = (event: WheelEvent<SVGSVGElement>) => {
-    event.preventDefault();
-    const point = pointFromEvent(event);
-    setViewport((prev) => {
-      const zoomFactor = event.deltaY < 0 ? 1.08 : 0.92;
-      const nextZoom = Math.max(0.45, Math.min(2.4, prev.zoom * zoomFactor));
-      const worldX = (point.x - prev.panX) / prev.zoom;
-      const worldY = (point.y - prev.panY) / prev.zoom;
-      return {
-        zoom: nextZoom,
-        panX: point.x - worldX * nextZoom,
-        panY: point.y - worldY * nextZoom,
+  const leaveNode = useCallback((nodeId: string) => {
+    setHoveredNodeId((current) => current === nodeId ? "" : current);
+  }, []);
+
+  const modelNodeTypes = useMemo(() => MODEL_FLOW_NODE_TYPES, []);
+  const modelEdgeTypes = useMemo(() => MODEL_FLOW_EDGE_TYPES, []);
+
+  const nextFlowNodes = useMemo<ModelFlowNode[]>(() => graphNodes.map((node) => {
+      const meta = renderMeta.get(node.id) || {
+        size: modelNodeDynamicSize(1, 0, false),
+        titleLines: [node.node_title],
+        noteLines: [],
+        note: "",
+        noteSegments: [],
+        expanded: false,
       };
+    return {
+      id: node.id,
+      type: "modelNode",
+      position: { x: node.positionX ?? 0, y: node.positionY ?? 0 },
+      data: {
+        modelNode: node,
+        meta,
+        onToggleExpanded: toggleNodeExpanded,
+        onOpenChart: openNodeChart,
+        onHoverNode: setHoveredNodeId,
+        onLeaveNode: leaveNode,
+      },
+      draggable: true,
+      selectable: false,
+      style: { width: meta.size.width, height: meta.size.height },
+    };
+  }), [graphNodes, leaveNode, openNodeChart, renderMeta, toggleNodeExpanded]);
+
+  const flowEdges = useMemo<ModelFlowEdge[]>(() => graphEdges.flatMap((edge) => {
+    const source = nodeMap.get(edge.sourceNodeId);
+    const target = nodeMap.get(edge.targetNodeId);
+    if (!source || !target) {
+      return [];
+    }
+    const handles = handlePairForModelEdge(source, target);
+    const highlighted = Boolean(hoveredNodeId && (edge.sourceNodeId === hoveredNodeId || edge.targetNodeId === hoveredNodeId));
+    return [{
+      id: edge.id,
+      type: "modelEdge",
+      source: edge.sourceNodeId,
+      target: edge.targetNodeId,
+      sourceHandle: handles.sourceHandle,
+      targetHandle: handles.targetHandle,
+      data: { highlighted },
+      selectable: false,
+    }];
+  }), [graphEdges, hoveredNodeId, nodeMap, renderMeta]);
+
+  useEffect(() => {
+    setFlowNodes(nextFlowNodes);
+    if (lastCenteredGraphRef.current !== graphViewportKey) {
+      lastCenteredGraphRef.current = graphViewportKey;
+      fitModelFlowView(fitView);
+    }
+  }, [fitView, graphViewportKey, nodeLayoutKey, nextFlowNodes]);
+
+  const onFlowNodesChange = useCallback((changes: NodeChange<ModelFlowNode>[]) => {
+    setFlowNodes((current) => applyNodeChanges(changes, current) as ModelFlowNode[]);
+  }, []);
+
+  const onNodeDragStop = useCallback((_event: unknown, node: ModelFlowNode) => {
+    const modelNode = nodeMap.get(node.id);
+    const size = modelNode ? modelNodeSize(modelNode, renderMeta) : { width: 260, height: 160 };
+    const nextX = Math.round(node.position.x / 20) * 20;
+    const nextY = Math.round(node.position.y / 20) * 20;
+    onMoveNode(node.id, {
+      x: Math.max(-2200, Math.min(4200 - size.width, nextX)),
+      y: Math.max(-2200, Math.min(5200 - size.height, nextY)),
     });
+  }, [nodeMap, onMoveNode, renderMeta]);
+
+  const expandAllNodes = () => {
+    const nextCollapsed = {};
+    const nextMeta = buildModelRenderMeta(graphNodes, variables, nextCollapsed);
+    const nextNodes = layoutModelNodes(graphNodes, graphEdges, nextMeta);
+    setCollapsedNodeIds({});
+    onLayoutNodes(nextNodes);
+    fitModelFlowView(fitView);
+  };
+
+  const collapseAllNodes = () => {
+    const nextCollapsed = Object.fromEntries(
+      graphNodes
+        .filter((node) => Boolean(renderMeta.get(node.id)?.note))
+        .map((node) => [node.id, true])
+    );
+    const nextMeta = buildModelRenderMeta(graphNodes, variables, nextCollapsed);
+    const nextNodes = layoutModelNodes(graphNodes, graphEdges, nextMeta);
+    setCollapsedNodeIds(nextCollapsed);
+    onLayoutNodes(nextNodes);
+    fitModelFlowView(fitView);
   };
 
   return (
-    <svg
-      ref={svgRef}
-      className="model-flow"
-      viewBox={`0 0 ${canvasWidth} ${canvasHeight}`}
-      role="img"
-      aria-label="Model flow"
-      onMouseDown={beginPan}
-      onMouseMove={(event) => {
-        moveDrag(event);
-        movePan(event);
-      }}
-      onMouseUp={endDrag}
-      onMouseLeave={endDrag}
-      onWheel={zoomCanvas}
-      onAuxClick={(event) => {
-        if (event.button === 1) {
-          event.preventDefault();
-        }
-      }}
-    >
-      <defs>
-        <marker id="model-arrow" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto" markerUnits="strokeWidth">
-          <path className="model-arrow-head" d="M0 0 9 4.5 0 9z" />
-        </marker>
-        <pattern id="model-grid" width={gridSize} height={gridSize} patternUnits="userSpaceOnUse">
-          <path className="model-grid-line" d={`M ${gridSize} 0 L 0 0 0 ${gridSize}`} />
-        </pattern>
-      </defs>
-      <g transform={`translate(${viewport.panX} ${viewport.panY}) scale(${viewport.zoom})`}>
-        <rect className="model-grid-fill" x="-1200" y="-900" width="2800" height="2200" fill="url(#model-grid)" />
-      {graphEdges.map((edge, edgeIndex) => {
-        const source = nodeMap.get(edge.sourceNodeId);
-        const target = nodeMap.get(edge.targetNodeId);
-        if (!source || !target) {
-          return null;
-        }
-        const route = routeModelEdge(source, target, graphNodes, edgeIndex, graphEdges);
-        return (
-          <g key={edge.id} className="model-edge">
-            <path d={route.path} markerEnd="url(#model-arrow)" />
-          </g>
-        );
-      })}
-      {graphNodes.map((node) => {
-        const size = modelNodeSize(node);
-        const x = node.positionX ?? 0;
-        const y = node.positionY ?? 0;
-        return (
-          <g
-            key={node.id}
-            className={`model-node model-node-${node.nodeType}${isCustomCalculationNode(node) ? " model-node-custom-calculation" : ""}${dragState?.nodeId === node.id ? " dragging" : ""}`}
-            transform={`translate(${x} ${y})`}
-            onMouseDown={(event) => beginDrag(event, node)}
-          >
-            <title>{modelNodeTooltip(node, nodeMap, variables, assumptions)}</title>
-            <rect width={size.width} height={size.height} rx={node.nodeType === "calculation" ? "20" : "10"} />
-            <text x={size.width / 2} y={size.height / 2}>
-              {node.nodeType === "calculation"
-                ? isCustomCalculationNode(node)
-                  ? truncateNodeLabel(node.label, 16)
-                  : mathNodeLabel(node) || truncateNodeLabel(node.label, 6)
-                : truncateNodeLabel(node.label, 32)}
-            </text>
-          </g>
-        );
-      })}
-      </g>
-    </svg>
+    <>
+      {graphNodes.length ? (
+        <div
+          className="model-flow-toolbar"
+          aria-label="Canvas controls"
+          onMouseDown={(event) => event.stopPropagation()}
+          onClick={(event) => event.stopPropagation()}
+        >
+          <button type="button" className="model-flow-tool-button" aria-label="Expand all notes" onClick={expandAllNodes}>
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M8 3H3v5M16 3h5v5M3 16v5h5M21 16v5h-5" />
+              <path d="M9 9 3.8 3.8M15 9l5.2-5.2M9 15l-5.2 5.2M15 15l5.2 5.2" />
+            </svg>
+          </button>
+          <button type="button" className="model-flow-tool-button" aria-label="Collapse all notes" onClick={collapseAllNodes}>
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M3 8h5V3M21 8h-5V3M3 16h5v5M21 16h-5v5" />
+              <path d="M8 8 3.8 3.8M16 8l4.2-4.2M8 16l-4.2 4.2M16 16l4.2 4.2" />
+            </svg>
+          </button>
+        </div>
+      ) : null}
+      {!graphNodes.length ? (
+        <div className="model-flow-empty" aria-live="polite">
+          <p>
+            <span>Describe the model you want to build.</span>
+            <span>Nisaba will find and validate data.</span>
+            <span>Let your ideas take shape.</span>
+          </p>
+        </div>
+      ) : null}
+      <ReactFlow
+        className="model-flow"
+        nodes={flowNodes}
+        edges={flowEdges}
+        nodeTypes={modelNodeTypes}
+        edgeTypes={modelEdgeTypes}
+        onNodesChange={onFlowNodesChange}
+        onNodeDragStop={onNodeDragStop}
+        minZoom={0.18}
+        maxZoom={3.2}
+        defaultEdgeOptions={{ type: "modelEdge" }}
+        nodesConnectable={false}
+        elementsSelectable={false}
+        panOnScroll
+        panOnDrag
+        zoomOnScroll
+        zoomOnPinch
+        fitView
+        fitViewOptions={{ padding: 0.22, minZoom: 0.18, maxZoom: 1.15 }}
+        proOptions={{ hideAttribution: true }}
+      >
+        <Background variant={BackgroundVariant.Lines} gap={20} size={0.8} className="model-flow-background" />
+      </ReactFlow>
+    {chartNode ? (
+      <ModelNodeChartModal
+        node={chartNode}
+        node_data={node_data}
+        onClose={() => setChartNodeId("")}
+      />
+    ) : null}
+    </>
   );
 }
 
 function ModelBuilderPane({
+  globalVariables,
+  activeVariableIds,
   variables,
-  assumptions,
   nodes,
   edges,
+  node_data,
   style,
+  onAddVariable,
+  onRemoveVariable,
+  onDeleteVariable,
   onMoveNode,
+  onLayoutNodes,
 }: {
+  globalVariables: ValidatedVariable[];
+  activeVariableIds: string[];
   variables: ValidatedVariable[];
-  assumptions: ModelAssumption[];
   nodes: ModelNode[];
   edges: ModelEdge[];
+  node_data: Record<string, unknown>;
   style?: CSSProperties;
+  onAddVariable: (variableId: string) => void;
+  onRemoveVariable: (variableId: string) => void;
+  onDeleteVariable: (variableId: string) => void;
   onMoveNode: (nodeId: string, position: { x: number; y: number }) => void;
+  onLayoutNodes: (nodes: ModelNode[]) => void;
 }) {
-  const [variablesOpen, setVariablesOpen] = useState(false);
-  const [assumptionsOpen, setAssumptionsOpen] = useState(false);
+  const [libraryOpen, setLibraryOpen] = useState(false);
+  const activeIds = new Set(activeVariableIds);
   return (
     <aside className="workspace-pane model-pane" style={style} aria-label="Model Builder">
       <div className="model-flow-shell">
-        <div className="canvas-info-stack" aria-label="Model context">
-          <section className={`canvas-info-panel canvas-variables-panel${variablesOpen ? " open" : ""}`} aria-label="Approved model variables">
-            <button
-              type="button"
-              className="canvas-info-toggle canvas-variables-toggle"
-              onClick={() => setVariablesOpen((open) => !open)}
-              aria-expanded={variablesOpen}
-            >
-              <span>Variables</span>
-              <small>{variables.length}</small>
-              <svg viewBox="0 0 12 12" aria-hidden="true">
-                <path d="M3 4.5 6 7.5 9 4.5" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.4" />
-              </svg>
-            </button>
-            {variablesOpen ? (
-              <div className="canvas-variable-list">
-                {variables.length ? (
-                  variables.slice(0, 6).map((variable) => {
-                    const fallbackDescription = [
-                      variable.metric,
+        <div
+          className="variable-library"
+          onMouseDown={(event) => event.stopPropagation()}
+          onClick={(event) => event.stopPropagation()}
+        >
+          <button
+            type="button"
+            className="variable-library-toggle"
+            aria-expanded={libraryOpen}
+            onClick={() => setLibraryOpen((open) => !open)}
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M4 5.5h16M4 12h16M4 18.5h16" />
+              <path d="M7 3.5v4M12 10v4M17 16.5v4" />
+            </svg>
+            <span>Variables</span>
+            <small>{activeIds.size}/{globalVariables.length}</small>
+          </button>
+          {libraryOpen ? (
+            <div className="variable-library-panel" role="dialog" aria-label="Variable library">
+              <div className="variable-library-header">
+                <span>Variable library</span>
+                <small>{globalVariables.length} saved</small>
+              </div>
+              <div className="variable-library-list">
+                {globalVariables.length ? (
+                  globalVariables.map((variable) => {
+                    const isActive = activeIds.has(variable.id);
+                    const meta = [
+                      variable.sourceName,
                       variable.geography,
                       variable.frequency,
                       variable.unit,
-                      variable.sourceName,
+                      variablePeriodLabel(variable),
                     ].filter(Boolean).join(" · ");
-                    const description = variable.contentsSummary || fallbackDescription;
                     return (
-                      <p key={variable.id}>
-                        <span>{variable.label || variable.name}</span>
-                        {description || variable.transformSummary ? <small>{description || variable.transformSummary}</small> : null}
-                      </p>
+                      <div key={variable.id} className={`variable-library-row${isActive ? " active" : ""}`}>
+                        <div className="variable-library-copy">
+                          <div className="variable-library-title">
+                            <span>{variable.label || variable.name}</span>
+                            {isActive ? <span className="variable-library-check">Active</span> : null}
+                          </div>
+                          {meta ? <small>{meta}</small> : null}
+                        </div>
+                        <div className="variable-library-actions">
+                          <button
+                            type="button"
+                            onClick={() => (isActive ? onRemoveVariable(variable.id) : onAddVariable(variable.id))}
+                          >
+                            {isActive ? "Remove" : "Add"}
+                          </button>
+                          <button
+                            type="button"
+                            className="variable-library-delete"
+                            aria-label={`Delete ${variable.label || variable.name}`}
+                            onClick={() => onDeleteVariable(variable.id)}
+                          >
+                            <svg viewBox="0 0 24 24" aria-hidden="true">
+                              <path d="M5 7h14M10 11v6M14 11v6M9 7l1-2h4l1 2M7 7l1 13h8l1-13" />
+                            </svg>
+                          </button>
+                        </div>
+                      </div>
                     );
                   })
                 ) : (
-                  <p className="pane-empty">None active.</p>
+                  <p className="variable-library-empty">No validated variables saved yet.</p>
                 )}
               </div>
-            ) : null}
-          </section>
-          <section className={`canvas-info-panel canvas-assumptions-panel${assumptionsOpen ? " open" : ""}`} aria-label="Model assumptions">
-            <button
-              type="button"
-              className="canvas-info-toggle canvas-assumptions-toggle"
-              onClick={() => setAssumptionsOpen((open) => !open)}
-              aria-expanded={assumptionsOpen}
-            >
-              <span>Assumptions</span>
-              <small>{assumptions.length}</small>
-              <svg viewBox="0 0 12 12" aria-hidden="true">
-                <path d="M3 4.5 6 7.5 9 4.5" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.4" />
-              </svg>
-            </button>
-            {assumptionsOpen ? (
-              <div className="assumption-list canvas-assumption-list">
-                {assumptions.length ? (
-                  assumptions.slice(0, 5).map((assumption) => (
-                    <p
-                      key={assumption.id}
-                      title={[assumption.valueText, assumption.method ? `Method: ${assumption.method}` : "", assumption.output ? `Output: ${assumption.output}` : ""].filter(Boolean).join("\n")}
-                    >
-                      <span>{assumption.label}</span>
-                      {assumption.valueText ? <small>{assumption.valueText}</small> : null}
-                    </p>
-                  ))
-                ) : (
-                  <p className="pane-empty">None set.</p>
-                )}
-              </div>
-            ) : null}
-          </section>
+            </div>
+          ) : null}
         </div>
-        <ModelFlowDiagram
-          nodes={nodes}
-          edges={edges}
-          variables={variables}
-          assumptions={assumptions}
-          onMoveNode={onMoveNode}
-        />
+          <ModelFlowDiagram
+            nodes={nodes}
+            edges={edges}
+            variables={variables}
+            node_data={node_data}
+            onMoveNode={onMoveNode}
+            onLayoutNodes={onLayoutNodes}
+          />
       </div>
     </aside>
   );
@@ -2569,6 +2821,7 @@ function App() {
   const [activeProjectId, setActiveProjectId] = useState(storedActiveProjectId || initialProject.id);
   const [projectsLoading, setProjectsLoading] = useState(true);
   const [validatedVariables, setValidatedVariables] = useState<ValidatedVariable[]>([]);
+  const [globalValidatedVariables, setGlobalValidatedVariables] = useState<ValidatedVariable[]>([]);
   const [modelBuilderState, setModelBuilderState] = useState<ModelBuilderState>(initialProject.modelBuilderState);
   const [projectsPaneWidth, setProjectsPaneWidth] = useState(DEFAULT_PROJECTS_PANE_WIDTH);
   const [projectsPaneCollapsed, setProjectsPaneCollapsed] = useState(false);
@@ -2610,7 +2863,6 @@ function App() {
   const displayedVariables = modelBuilderState.variables.length
     ? modelBuilderState.variables
     : validatedVariables;
-  const displayedAssumptions = modelBuilderState.assumptions;
   const fallbackGraph = buildFallbackGraph(displayedVariables);
   const displayedNodes = modelBuilderState.nodes.length
     ? modelBuilderState.nodes
@@ -2618,6 +2870,140 @@ function App() {
   const displayedEdges = modelBuilderState.edges.length
     ? modelBuilderState.edges
     : fallbackGraph.edges;
+  const displayedNodeData = modelBuilderState.node_data || {};
+
+  const persistProjectVariableState = (
+    projectId: string,
+    activeIds: string[],
+    nextState: ModelBuilderState
+  ) => {
+    return supabase
+      .from("modelling_projects")
+      .update({
+        active_validated_variable_ids: activeIds,
+        model_builder_state: nextState,
+        model_graph_state: toModelGraphState(nextState),
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", projectId);
+  };
+
+  const applyCurrentProjectVariableState = (activeIds: string[], nextState: ModelBuilderState) => {
+    setModelBuilderState(nextState);
+    setValidatedVariables(nextState.variables);
+    setProjects((prev) =>
+      prev.map((project) =>
+        project.id === activeProjectId
+          ? {
+              ...project,
+              activeValidatedVariableIds: activeIds,
+              modelBuilderState: nextState,
+              updatedAt: new Date().toISOString(),
+            }
+          : project
+      )
+    );
+    void persistProjectVariableState(activeProjectId, activeIds, nextState).then(({ error: projectError }) => {
+      if (projectError) {
+        console.error("Failed to update project variables", projectError);
+        setError(projectError.message);
+      }
+    });
+  };
+
+  const addVariableToCurrentProject = (variableId: string) => {
+    const variable = globalValidatedVariables.find((item) => item.id === variableId);
+    const activeProject = projects.find((project) => project.id === activeProjectId);
+    const currentActiveIds = Array.from(
+      new Set([...(activeProject?.activeValidatedVariableIds || []), ...displayedVariables.map((item) => item.id)])
+    );
+    if (!variable || !activeProject || currentActiveIds.includes(variableId)) {
+      return;
+    }
+    const baseState: ModelBuilderState = {
+      variables: displayedVariables,
+      nodes: modelBuilderState.nodes.length ? displayedNodes : [],
+      edges: modelBuilderState.edges.length ? displayedEdges : [],
+      node_data: displayedNodeData,
+    };
+    const nextState = modelStateWithVariable(baseState, variable);
+    applyCurrentProjectVariableState([...currentActiveIds, variableId], nextState);
+  };
+
+  const removeVariableFromCurrentProject = (variableId: string) => {
+    const activeProject = projects.find((project) => project.id === activeProjectId);
+    const currentActiveIds = Array.from(
+      new Set([...(activeProject?.activeValidatedVariableIds || []), ...displayedVariables.map((item) => item.id)])
+    );
+    if (!activeProject || !currentActiveIds.includes(variableId)) {
+      return;
+    }
+    const baseState: ModelBuilderState = {
+      variables: displayedVariables,
+      nodes: modelBuilderState.nodes.length ? displayedNodes : [],
+      edges: modelBuilderState.edges.length ? displayedEdges : [],
+      node_data: displayedNodeData,
+    };
+    const nextState = modelStateWithoutVariable(baseState, variableId);
+    const activeIds = currentActiveIds.filter((id) => id !== variableId);
+    applyCurrentProjectVariableState(activeIds, nextState);
+  };
+
+  const deleteGlobalVariable = async (variableId: string) => {
+    const variable = globalValidatedVariables.find((item) => item.id === variableId);
+    if (!variable) {
+      return;
+    }
+    const label = variable.label || variable.name;
+    const affectedProjects = projects.filter((project) => project.activeValidatedVariableIds.includes(variableId));
+    const affectedProjectNames = affectedProjects.map((project) => project.name || "Untitled project").join(", ");
+    const affectedWarning = affectedProjects.length
+      ? `\n\nIt is active in ${affectedProjects.length} project${affectedProjects.length === 1 ? "" : "s"}: ${affectedProjectNames}.`
+      : "";
+    if (!window.confirm(`Delete "${label}" from the global variable library? This removes it from projects that use it.${affectedWarning}`)) {
+      return;
+    }
+    const nextProjects = projects.map((project) => {
+      if (!project.activeValidatedVariableIds.includes(variableId)) {
+        return project;
+      }
+      return {
+        ...project,
+        activeValidatedVariableIds: project.activeValidatedVariableIds.filter((id) => id !== variableId),
+        modelBuilderState: modelStateWithoutVariable(project.modelBuilderState, variableId),
+        updatedAt: new Date().toISOString(),
+      };
+    });
+    const { error: deleteError } = await supabase
+      .from("validated_variables")
+      .delete()
+      .eq("id", variableId);
+    if (deleteError) {
+      console.error("Failed to delete validated variable", deleteError);
+      setError(deleteError.message);
+      return;
+    }
+    await Promise.all(
+      affectedProjects.map((project) => {
+        const nextProject = nextProjects.find((item) => item.id === project.id);
+        if (!nextProject) {
+          return Promise.resolve();
+        }
+        return persistProjectVariableState(
+          nextProject.id,
+          nextProject.activeValidatedVariableIds,
+          nextProject.modelBuilderState
+        );
+      })
+    );
+    setGlobalValidatedVariables((prev) => prev.filter((item) => item.id !== variableId));
+    setProjects(nextProjects);
+    const activeProject = nextProjects.find((project) => project.id === activeProjectId);
+    if (activeProject) {
+      setModelBuilderState(activeProject.modelBuilderState);
+      setValidatedVariables(activeProject.modelBuilderState.variables);
+    }
+  };
 
   const persistModelBuilderState = (nextState: ModelBuilderState) => {
     if (!session?.user?.id || !activeProjectId) {
@@ -2640,15 +3026,33 @@ function App() {
   const moveModelNode = (nodeId: string, position: { x: number; y: number }) => {
     const baseState: ModelBuilderState = {
       variables: displayedVariables,
-      assumptions: displayedAssumptions,
       nodes: displayedNodes,
       edges: displayedEdges,
+      node_data: displayedNodeData,
     };
     const nextState: ModelBuilderState = {
       ...baseState,
       nodes: positionedNodes(baseState.nodes).map((node) =>
         node.id === nodeId ? { ...node, positionX: position.x, positionY: position.y } : node
       ),
+    };
+    setModelBuilderState(nextState);
+    setProjects((prev) =>
+      prev.map((project) =>
+        project.id === activeProjectId
+          ? { ...project, modelBuilderState: nextState, updatedAt: new Date().toISOString() }
+          : project
+      )
+    );
+    persistModelBuilderState(nextState);
+  };
+
+  const layoutModelBuilderNodes = (layoutNodes: ModelNode[]) => {
+    const nextState: ModelBuilderState = {
+      variables: displayedVariables,
+      nodes: layoutNodes,
+      edges: displayedEdges,
+      node_data: displayedNodeData,
     };
     setModelBuilderState(nextState);
     setProjects((prev) =>
@@ -2913,6 +3317,38 @@ function App() {
   }, [authReady, session]);
 
   useEffect(() => {
+    if (!authReady || !session) {
+      setGlobalValidatedVariables([]);
+      return;
+    }
+
+    let active = true;
+    void supabase
+      .from("validated_variables")
+      .select(VALIDATED_VARIABLE_LIBRARY_SELECT_COLUMNS)
+      .eq("validation_status", "validated")
+      .order("updated_at", { ascending: false })
+      .then(({ data, error: variableError }) => {
+        if (!active) {
+          return;
+        }
+        if (variableError) {
+          console.error("Failed to load global validated variables", variableError);
+          setError(variableError.message);
+          setGlobalValidatedVariables([]);
+          return;
+        }
+        setGlobalValidatedVariables(
+          Array.isArray(data) ? data.map((row) => mapVariableRow(row as Record<string, unknown>)) : []
+        );
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [authReady, session]);
+
+  useEffect(() => {
     if (!authReady || !session || !activeProjectId) {
       return;
     }
@@ -2929,7 +3365,7 @@ function App() {
 
       const variablesResult = await supabase
         .from("validated_variables")
-        .select("id,name,label,source_name,metric,unit,geography,frequency,seasonal_treatment,transform_summary,validation_status,evidence_artifact")
+        .select(VALIDATED_VARIABLE_SELECT_COLUMNS)
         .in("id", activeVariableIds);
       if (!active) {
         return;
@@ -3003,19 +3439,14 @@ function App() {
         if (backendMessages.length && runStatus === "processing") {
           const existingPending = pendingRef.current;
           const assistantMessageId = existingPending?.id || createConversationId();
-          const hasAssistantMessage = backendMessages.some((message) => message.sender === "assistant");
-          setMessages(
-            hasAssistantMessage
-              ? backendMessages
-              : [
-                  ...backendMessages,
-                  {
-                    id: assistantMessageId,
-                    sender: "assistant",
-                    content: "",
-                  },
-                ]
-          );
+          setMessages((prev) => {
+            const mergedMessages = mergeProcessingMessages(prev, backendMessages, assistantMessageId);
+            const latestProgress = latestProgressContent(mergedMessages);
+            if (latestProgress) {
+              lastProgressRef.current = latestProgress;
+            }
+            return mergedMessages;
+          });
           pendingRef.current = {
             id: assistantMessageId,
             userId: existingPending?.userId || createConversationId(),
@@ -3052,7 +3483,6 @@ function App() {
           if (taskId) {
             setActiveRunTaskId(taskId);
           }
-          lastProgressRef.current = "";
           setIsStreaming(true);
           return;
         }
@@ -3475,10 +3905,17 @@ function App() {
     }
 
     let cancelled = false;
+    let polling = false;
+    let pollTimer: number | undefined;
     const assistantMessageId = pendingRef.current.id;
     const taskId = activeRunTaskId;
 
     const pollOnce = async () => {
+      if (cancelled || polling) {
+        return;
+      }
+      polling = true;
+      let shouldContinuePolling = true;
       try {
         const response = await fetch(
           `${API_BASE}/api/chat/task-status/${encodeURIComponent(conversationId)}/${encodeURIComponent(taskId)}`
@@ -3507,12 +3944,27 @@ function App() {
         }
 
         if (runStatus === "completed") {
+          shouldContinuePolling = false;
           const storedMessages = await loadStoredChatHistory(activeProjectId);
           if (storedMessages.length) {
             setMessages(storedMessages);
           } else {
             applyCompletedTaskSnapshot(payload, setMessages, assistantMessageId);
           }
+          void supabase
+            .from("validated_variables")
+            .select(VALIDATED_VARIABLE_LIBRARY_SELECT_COLUMNS)
+            .eq("validation_status", "validated")
+            .order("updated_at", { ascending: false })
+            .then(({ data, error: variableError }) => {
+              if (variableError) {
+                console.error("Failed to refresh global validated variables", variableError);
+                return;
+              }
+              setGlobalValidatedVariables(
+                Array.isArray(data) ? data.map((row) => mapVariableRow(row as Record<string, unknown>)) : []
+              );
+            });
           setIsStreaming(false);
           setActiveRunTaskId("");
           pendingRef.current = null;
@@ -3538,6 +3990,7 @@ function App() {
         }
 
         if (runStatus === "failed" || runStatus === "cancelled") {
+          shouldContinuePolling = false;
           const errorText = latestError || "The background run ended before returning a response.";
           setError(errorText);
           if (!applyCompletedTaskSnapshot(payload, setMessages, assistantMessageId)) {
@@ -3561,6 +4014,7 @@ function App() {
           setError("Connection interrupted. Retrying...");
           return;
         }
+        shouldContinuePolling = false;
         const message =
           err instanceof Error ? err.message : "Failed to reach the server.";
         setError(message);
@@ -3574,17 +4028,23 @@ function App() {
         setIsStreaming(false);
         setActiveRunTaskId("");
         pendingRef.current = null;
+      } finally {
+        polling = false;
+        if (shouldContinuePolling && !cancelled) {
+          pollTimer = window.setTimeout(() => {
+            void pollOnce();
+          }, 1500);
+        }
       }
     };
 
     void pollOnce();
-    const timer = window.setInterval(() => {
-      void pollOnce();
-    }, 1500);
 
     return () => {
       cancelled = true;
-      window.clearInterval(timer);
+      if (pollTimer !== undefined) {
+        window.clearTimeout(pollTimer);
+      }
     };
   }, [activeProjectId, activeRunTaskId, conversationId, isStreaming]);
 
@@ -3883,11 +4343,22 @@ function App() {
         />
 
         <ModelBuilderPane
+          globalVariables={globalValidatedVariables}
+          activeVariableIds={Array.from(
+            new Set([
+              ...(projects.find((project) => project.id === activeProjectId)?.activeValidatedVariableIds || []),
+              ...displayedVariables.map((variable) => variable.id),
+            ])
+          )}
           variables={displayedVariables}
-          assumptions={displayedAssumptions}
           nodes={displayedNodes}
           edges={displayedEdges}
+          node_data={displayedNodeData}
+          onAddVariable={addVariableToCurrentProject}
+          onRemoveVariable={removeVariableFromCurrentProject}
+          onDeleteVariable={deleteGlobalVariable}
           onMoveNode={moveModelNode}
+          onLayoutNodes={layoutModelBuilderNodes}
           style={{
             flexGrow: 100 - workspaceSplitPercent,
             flexBasis: 0,

@@ -71,6 +71,9 @@ def _normalize_variable(value: Any, index: int) -> Dict[str, Any]:
         "transformSummary": _as_text(raw.get("transformSummary") or raw.get("transform_summary")),
         "validationStatus": status if status in {"candidate", "rejected"} else "validated",
     }
+    node_description = _as_text(raw.get("nodeDescription") or raw.get("node_description"))
+    if node_description:
+        normalized["nodeDescription"] = node_description
     contents_summary = _as_text(raw.get("contentsSummary") or raw.get("contents_summary"))
     if contents_summary:
         normalized["contentsSummary"] = contents_summary
@@ -80,58 +83,22 @@ def _normalize_variable(value: Any, index: int) -> Dict[str, Any]:
     return normalized
 
 
-def _normalize_assumption(value: Any, index: int) -> Dict[str, Any]:
-    raw = value if isinstance(value, dict) else {}
-    assumption = {
-        "id": _as_text(raw.get("id")) or f"assumption-{index + 1}",
-        "variableId": _as_text(raw.get("variableId") or raw.get("variable_id") or raw.get("variable")),
-        "label": _as_text(raw.get("label")) or "Assumption",
-        "valueText": _as_text(raw.get("valueText") or raw.get("value_text")),
-    }
-    for source_key, target_key in (
-        ("nodeId", "nodeId"),
-        ("node_id", "nodeId"),
-        ("calculationNodeId", "nodeId"),
-        ("calculation_node_id", "nodeId"),
-        ("method", "method"),
-        ("output", "output"),
-        ("logicSummary", "logicSummary"),
-        ("logic_summary", "logicSummary"),
-    ):
-        text = _as_text(raw.get(source_key))
-        if text:
-            assumption[target_key] = text
-    for source_key, target_key in (
-        ("inputs", "inputs"),
-        ("parameters", "parameters"),
-        ("calculationLogic", "calculationLogic"),
-        ("calculation_logic", "calculationLogic"),
-        ("calculationSpec", "calculationSpec"),
-        ("calculation_spec", "calculationSpec"),
-    ):
-        item = raw.get(source_key)
-        if isinstance(item, (dict, list)):
-            assumption[target_key] = item
-    return assumption
-
-
 def _normalize_node(value: Any, index: int) -> Dict[str, Any]:
     raw = value if isinstance(value, dict) else {}
     node_id = _as_text(raw.get("id")) or f"node-{index + 1}"
     node_type = _as_text(raw.get("nodeType") or raw.get("node_type"))
-    if node_type not in {"variable", "assumption", "calculation", "result"}:
+    if node_type not in {"variable", "calculation", "result"}:
         node_type = "variable"
     node: Dict[str, Any] = {
         "id": node_id,
-        "label": _as_text(raw.get("label")) or node_id,
+        "node_title": _as_text(raw.get("node_title")) or node_id,
+        "node_description": _as_text(raw.get("node_description")),
         "nodeType": node_type,
     }
     for source_key, target_key in (
         ("variableId", "variableId"),
         ("variable_id", "variableId"),
         ("expression", "expression"),
-        ("assumptionId", "assumptionId"),
-        ("assumption_id", "assumptionId"),
         ("method", "method"),
         ("logicSummary", "logicSummary"),
         ("logic_summary", "logicSummary"),
@@ -177,6 +144,92 @@ def _normalize_edge(value: Any, index: int) -> Dict[str, Any] | None:
     }
 
 
+def _looks_like_generated_node_id(node_id: str) -> bool:
+    text = _as_text(node_id)
+    if not text.startswith("node-"):
+        return False
+    suffix = text.removeprefix("node-")
+    return suffix.isdigit()
+
+
+def _validate_graph_integrity(
+    *,
+    nodes: List[Dict[str, Any]],
+    edges: List[Dict[str, Any]],
+    node_data: Dict[str, Any],
+    allow_missing_node_data_ids: Optional[set[str]] = None,
+) -> None:
+    allow_missing_node_data_ids = allow_missing_node_data_ids or set()
+    node_ids = [_as_text(node.get("id")) for node in nodes if isinstance(node, dict)]
+    if len(node_ids) != len(set(node_ids)):
+        raise RuntimeError("Model graph update rejected: node ids must be unique.")
+    if any(not node_id for node_id in node_ids):
+        raise RuntimeError("Model graph update rejected: every visible node must include a stable node id.")
+    generated_ids = [node_id for node_id in node_ids if _looks_like_generated_node_id(node_id)]
+    if generated_ids:
+        raise RuntimeError(
+            "Model graph update rejected: generated node ids are not allowed. Use stable semantic node ids."
+        )
+
+    node_id_set = set(node_ids)
+    for node in nodes:
+        node_id = _as_text(node.get("id"))
+        if _is_symbol_only_calculation_node(node):
+            raise RuntimeError(
+                f"Model graph update rejected: node {node_id} is a standalone math-symbol node. "
+                "Put the expression on the named output node."
+            )
+        if not _as_text(node.get("node_title")):
+            raise RuntimeError(f"Model graph update rejected: node {node_id} is missing node_title.")
+        if not _as_text(node.get("node_description")):
+            raise RuntimeError(f"Model graph update rejected: node {node_id} is missing node_description.")
+        if node_id not in node_data and node_id not in allow_missing_node_data_ids:
+            raise RuntimeError(f"Model graph update rejected: node {node_id} has no saved node_data.")
+
+    edge_pairs: set[tuple[str, str]] = set()
+    for edge in edges:
+        source_id = _as_text(edge.get("sourceNodeId"))
+        target_id = _as_text(edge.get("targetNodeId"))
+        if source_id not in node_id_set or target_id not in node_id_set:
+            raise RuntimeError(
+                f"Model graph update rejected: edge {source_id}->{target_id} references a missing node."
+            )
+        edge_pairs.add((source_id, target_id))
+
+    if len(nodes) > 1 and not edge_pairs:
+        raise RuntimeError("Model graph update rejected: multi-node models must preserve graph links.")
+
+    for node in nodes:
+        if _as_text(node.get("nodeType")) != "calculation":
+            continue
+        node_id = _as_text(node.get("id"))
+        input_ids = _unique_text_list(node.get("inputs"))
+        if not input_ids:
+            raise RuntimeError(f"Model graph update rejected: calculation node {node_id} must include inputs.")
+        for input_id in input_ids:
+            if input_id not in node_id_set:
+                raise RuntimeError(
+                    f"Model graph update rejected: calculation node {node_id} input {input_id} is missing."
+                )
+            if (input_id, node_id) not in edge_pairs:
+                raise RuntimeError(
+                    f"Model graph update rejected: calculation node {node_id} input {input_id} has no matching edge."
+                )
+
+
+def _is_symbol_only_calculation_node(node: Dict[str, Any]) -> bool:
+    if _as_text(node.get("nodeType")) != "calculation":
+        return False
+    label = _as_text(node.get("node_title"))
+    expression = _as_text(node.get("expression"))
+    symbol_values = {"+", "-", "−", "*", "x", "×", "/", "÷", "="}
+    if label not in symbol_values:
+        return False
+    if expression and expression not in symbol_values:
+        return False
+    return True
+
+
 def normalize_model_builder_state(value: Any) -> Dict[str, Any]:
     raw = value if isinstance(value, dict) else {}
     graph = normalize_model_graph_state(raw)
@@ -185,17 +238,9 @@ def normalize_model_builder_state(value: Any) -> Dict[str, Any]:
             _normalize_variable(item, index)
             for index, item in enumerate(raw.get("variables") if isinstance(raw.get("variables"), list) else [])
         ],
-        "assumptions": normalize_model_assumptions(raw.get("assumptions")),
         "nodes": graph["nodes"],
         "edges": graph["edges"],
     }
-
-
-def normalize_model_assumptions(value: Any) -> List[Dict[str, Any]]:
-    return [
-        _normalize_assumption(item, index)
-        for index, item in enumerate(value if isinstance(value, list) else [])
-    ]
 
 
 def normalize_model_graph_state(value: Any) -> Dict[str, Any]:
@@ -209,97 +254,40 @@ def normalize_model_graph_state(value: Any) -> Dict[str, Any]:
         edge = _normalize_edge(item, index)
         if edge:
             edges.append(edge)
-    edges = _repair_legacy_operation_bypass_edges(nodes, edges)
-    edges = _repair_edges_from_calculation_inputs(nodes, edges)
     return {
         "nodes": nodes,
         "edges": edges,
     }
 
 
-def _repair_legacy_operation_bypass_edges(nodes: List[Dict[str, Any]], edges: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    node_map = {str(node.get("id")): node for node in nodes}
-    operation_to_result = [
-        edge
-        for edge in edges
-        if node_map.get(str(edge.get("sourceNodeId")), {}).get("nodeType") == "calculation"
-        and node_map.get(str(edge.get("targetNodeId")), {}).get("nodeType") == "result"
-    ]
-    if not operation_to_result:
-        return edges
-
-    repaired: List[Dict[str, Any]] = []
-    for edge in edges:
-        source = node_map.get(str(edge.get("sourceNodeId")))
-        target = node_map.get(str(edge.get("targetNodeId")))
-        if not source or target is None or target.get("nodeType") != "result":
-            repaired.append(edge)
+def normalize_node_data(value: Any) -> Dict[str, Any]:
+    raw = value if isinstance(value, dict) else {}
+    normalized: Dict[str, Any] = {}
+    for key, item in raw.items():
+        node_id = _as_text(key)
+        if not node_id or not isinstance(item, dict):
             continue
-        if source.get("nodeType") == "calculation":
-            repaired.append(edge)
-            continue
-        matching_operation_edge = next(
-            (candidate for candidate in operation_to_result if candidate.get("targetNodeId") == edge.get("targetNodeId")),
-            None,
-        )
-        if not matching_operation_edge:
-            repaired.append(edge)
-            continue
-        already_feeds_operation = any(
-            candidate.get("sourceNodeId") == edge.get("sourceNodeId")
-            and candidate.get("targetNodeId") == matching_operation_edge.get("sourceNodeId")
-            for candidate in edges
-        )
-        if already_feeds_operation:
-            continue
-        base_edge_id = _as_text(edge.get("id")) or f"{edge.get('sourceNodeId')}-{matching_operation_edge.get('sourceNodeId')}"
-        repaired.append(
-            {
-                "id": f"{base_edge_id}-rewired",
-                "sourceNodeId": edge.get("sourceNodeId"),
-                "targetNodeId": matching_operation_edge.get("sourceNodeId"),
-            }
-        )
-    return repaired
+        columns = item.get("columns") if isinstance(item.get("columns"), list) else ["period", "value"]
+        records = item.get("records") if isinstance(item.get("records"), list) else []
+        series = item.get("series") if isinstance(item.get("series"), list) else []
+        normalized[node_id] = {
+            "kind": _as_text(item.get("kind")) or "calculated_series",
+            "node_id": _as_text(item.get("node_id")) or node_id,
+            "node_title": _as_text(item.get("node_title")),
+            "unit": _as_text(item.get("unit")),
+            "data_kind": _as_text(item.get("data_kind")) or "calculated",
+            "computed_at": _as_text(item.get("computed_at")),
+            "input_fingerprint": _as_text(item.get("input_fingerprint")),
+            "columns": [_as_text(column) for column in columns if _as_text(column)] or ["period", "value"],
+            "records": records,
+        }
+        if series:
+            normalized[node_id]["series"] = series
+    return normalized
 
 
 def _edge_id(source: str, target: str) -> str:
     return _clean_id(f"{source}_{target}", f"{source}_{target}")
-
-
-def _repair_edges_from_calculation_inputs(nodes: List[Dict[str, Any]], edges: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    calculation_inputs = {
-        _as_text(node.get("id")): _unique_text_list(node.get("inputs"))
-        for node in nodes
-        if _as_text(node.get("nodeType")) == "calculation" and _unique_text_list(node.get("inputs"))
-    }
-    if not calculation_inputs:
-        return edges
-
-    repaired = [
-        edge
-        for edge in edges
-        if _as_text(edge.get("targetNodeId")) not in calculation_inputs
-        or _as_text(edge.get("sourceNodeId")) in calculation_inputs[_as_text(edge.get("targetNodeId"))]
-    ]
-    existing_pairs = {
-        (_as_text(edge.get("sourceNodeId")), _as_text(edge.get("targetNodeId")))
-        for edge in repaired
-    }
-    for target_node_id, input_node_ids in calculation_inputs.items():
-        for input_node_id in input_node_ids:
-            pair = (input_node_id, target_node_id)
-            if pair in existing_pairs:
-                continue
-            repaired.append(
-                {
-                    "id": _edge_id(input_node_id, target_node_id),
-                    "sourceNodeId": input_node_id,
-                    "targetNodeId": target_node_id,
-                }
-            )
-            existing_pairs.add(pair)
-    return repaired
 
 
 def _fetch_active_variables(conn, *, user_id: str, project_id: str) -> List[Dict[str, Any]]:
@@ -316,8 +304,9 @@ def _fetch_active_variables(conn, *, user_id: str, project_id: str) -> List[Dict
           vv.frequency,
           vv.seasonal_treatment as "seasonalTreatment",
           vv.transform_summary as "transformSummary",
-          vv.evidence_artifact->>'contents_summary' as "contentsSummary",
-          vv.evidence_artifact->'contents' as contents,
+          vv.node_description as "nodeDescription",
+          vv.contents_summary as "contentsSummary",
+          vv.validated_data as contents,
           vv.validation_status as "validationStatus"
         from public.validated_variables vv
         join public.modelling_projects mp
@@ -338,44 +327,65 @@ def fetch_model_builder_state(*, user_id: str, project_id: str) -> Dict[str, Any
     if not user_id or not project_id:
         return {}
     with _connect() as conn:
-        try:
-            row = conn.execute(
-                """
-                select model_builder_state, model_assumptions, model_graph_state, active_validated_variable_ids
-                from public.modelling_projects
-                where user_id = %s and id = %s
-                limit 1
-                """,
-                (user_id, project_id),
-            ).fetchone()
-        except psycopg.errors.UndefinedColumn:
-            conn.rollback()
-            row = conn.execute(
-                """
-                select model_builder_state, active_validated_variable_ids
-                from public.modelling_projects
-                where user_id = %s and id = %s
-                limit 1
-                """,
-                (user_id, project_id),
-            ).fetchone()
+        row = conn.execute(
+            """
+            select model_builder_state, model_graph_state, node_data, active_validated_variable_ids
+            from public.modelling_projects
+            where user_id = %s and id = %s
+            limit 1
+            """,
+            (user_id, project_id),
+        ).fetchone()
         active_variables = _fetch_active_variables(conn, user_id=user_id, project_id=project_id) if row else []
     if not row:
         return {}
-    has_split_state = "model_assumptions" in row and "model_graph_state" in row
     legacy_state = normalize_model_builder_state(row.get("model_builder_state"))
     graph_state = (
         normalize_model_graph_state(row.get("model_graph_state"))
-        if has_split_state
+        if "model_graph_state" in row
         else {"nodes": legacy_state["nodes"], "edges": legacy_state["edges"]}
     )
-    assumptions = normalize_model_assumptions(row.get("model_assumptions")) if has_split_state else legacy_state["assumptions"]
+    node_data = normalize_node_data(row.get("node_data"))
     return {
         "variables": active_variables or legacy_state["variables"],
-        "assumptions": assumptions,
         "nodes": graph_state["nodes"],
         "edges": graph_state["edges"],
+        "node_data": node_data,
     }
+
+
+def save_node_data_state(
+    *,
+    user_id: str,
+    project_id: str,
+    node_id: str,
+    result: Dict[str, Any],
+) -> Dict[str, Any]:
+    user_id = _as_text(user_id)
+    project_id = _as_text(project_id)
+    node_id = _as_text(node_id)
+    if not user_id or not project_id or not node_id:
+        raise RuntimeError("A Supabase user_id, project_id, and node_id are required to save node data.")
+    with _connect() as conn:
+        row = conn.execute(
+            """
+            update public.modelling_projects
+            set node_data = jsonb_set(
+                  coalesce(node_data, '{}'::jsonb),
+                  array[%s]::text[],
+                  %s::jsonb,
+                  true
+                ),
+                updated_at = now()
+            where user_id = %s and id = %s
+            returning node_data
+            """,
+            (node_id, Json(_jsonable(result)), user_id, project_id),
+        ).fetchone()
+        conn.commit()
+    if not row:
+        raise RuntimeError("No matching project was found for this user.")
+    return normalize_node_data(row.get("node_data"))
 
 
 def update_model_builder_state(*, user_id: str, project_id: str, model_builder_state: Dict[str, Any]) -> Dict[str, Any]:
@@ -394,22 +404,35 @@ def update_model_builder_state(*, user_id: str, project_id: str, model_builder_s
         if _as_text(variable.get("validationStatus")) == "validated" and _as_text(variable.get("id"))
     ]
     with _connect() as conn:
+        current = conn.execute(
+            """
+            select node_data
+            from public.modelling_projects
+            where user_id = %(user_id)s and id = %(project_id)s
+            limit 1
+            """,
+            {"user_id": user_id, "project_id": project_id},
+        ).fetchone()
+        current_node_data = normalize_node_data(current.get("node_data") if current else {})
+        _validate_graph_integrity(
+            nodes=graph_state["nodes"],
+            edges=graph_state["edges"],
+            node_data=current_node_data,
+        )
         row = conn.execute(
             """
             update public.modelling_projects
             set model_builder_state = %(model_builder_state)s,
-                model_assumptions = %(model_assumptions)s,
                 model_graph_state = %(model_graph_state)s,
                 active_validated_variable_ids = %(active_variable_ids)s,
                 updated_at = now()
             where user_id = %(user_id)s and id = %(project_id)s
-            returning model_builder_state, model_assumptions, model_graph_state, active_validated_variable_ids
+            returning model_builder_state, model_graph_state, active_validated_variable_ids
             """,
             {
                 "user_id": user_id,
                 "project_id": project_id,
                 "model_builder_state": Json(_jsonable(normalized)),
-                "model_assumptions": Json(_jsonable(normalized["assumptions"])),
                 "model_graph_state": Json(_jsonable(graph_state)),
                 "active_variable_ids": Json(active_variable_ids),
             },
@@ -422,71 +445,10 @@ def update_model_builder_state(*, user_id: str, project_id: str, model_builder_s
     return {
         "model_builder_state": {
             "variables": active_variables or normalized["variables"],
-            "assumptions": normalize_model_assumptions(row.get("model_assumptions")),
             "nodes": graph_state["nodes"],
             "edges": graph_state["edges"],
         },
         "active_validated_variable_ids": _text_list(row.get("active_validated_variable_ids")),
-    }
-
-
-def update_model_assumptions_state(
-    *,
-    user_id: str,
-    project_id: str,
-    assumptions: List[Dict[str, Any]],
-) -> Dict[str, Any]:
-    user_id = _as_text(user_id)
-    project_id = _as_text(project_id)
-    if not user_id or not project_id:
-        raise RuntimeError("A Supabase user_id and project_id are required to update model assumptions.")
-    normalized = normalize_model_assumptions(assumptions)
-    current = fetch_model_builder_state(user_id=user_id, project_id=project_id)
-    graph_nodes = list(current.get("nodes") if isinstance(current.get("nodes"), list) else [])
-    graph_edges = list(current.get("edges") if isinstance(current.get("edges"), list) else [])
-    variables = list(current.get("variables") if isinstance(current.get("variables"), list) else [])
-    graph_nodes, graph_edges, normalized = _append_missing_custom_calculation_nodes(
-        nodes=graph_nodes,
-        edges=graph_edges,
-        assumptions=normalized,
-        variables=variables,
-    )
-    graph_state = normalize_model_graph_state({"nodes": graph_nodes, "edges": graph_edges})
-    with _connect() as conn:
-        row = conn.execute(
-            """
-            update public.modelling_projects
-            set model_assumptions = %(model_assumptions)s,
-                model_graph_state = %(model_graph_state)s,
-                model_builder_state = jsonb_set(
-                  jsonb_set(
-                    jsonb_set(coalesce(model_builder_state, '{}'::jsonb), '{assumptions}', %(model_assumptions)s::jsonb, true),
-                    '{nodes}',
-                    %(nodes)s::jsonb,
-                    true
-                  ),
-                  '{edges}',
-                  %(edges)s::jsonb,
-                  true
-                ),
-                updated_at = now()
-            where user_id = %(user_id)s and id = %(project_id)s
-            returning model_assumptions
-            """,
-            {
-                "user_id": user_id,
-                "project_id": project_id,
-                "model_assumptions": Json(_jsonable(normalized)),
-                "model_graph_state": Json(_jsonable(graph_state)),
-                "nodes": Json(_jsonable(graph_state["nodes"])),
-                "edges": Json(_jsonable(graph_state["edges"])),
-            },
-        ).fetchone()
-        conn.commit()
-    if not row:
-        raise RuntimeError("No matching project was found for this user.")
-    return {
-        "model_builder_state": fetch_model_builder_state(user_id=user_id, project_id=project_id),
     }
 
 
@@ -497,6 +459,7 @@ def update_model_graph_state(
     nodes: List[Dict[str, Any]],
     edges: List[Dict[str, Any]],
     variables: Optional[List[Dict[str, Any]]] = None,
+    allow_missing_node_data_ids: Optional[set[str]] = None,
 ) -> Dict[str, Any]:
     user_id = _as_text(user_id)
     project_id = _as_text(project_id)
@@ -518,6 +481,22 @@ def update_model_graph_state(
         if variables is not None:
             set_active_variables_sql = ", active_validated_variable_ids = %(active_variable_ids)s"
             params["active_variable_ids"] = Json(active_variable_ids)
+        current = conn.execute(
+            """
+            select node_data
+            from public.modelling_projects
+            where user_id = %(user_id)s and id = %(project_id)s
+            limit 1
+            """,
+            params,
+        ).fetchone()
+        current_node_data = normalize_node_data(current.get("node_data") if current else {})
+        _validate_graph_integrity(
+            nodes=graph_state["nodes"],
+            edges=graph_state["edges"],
+            node_data=current_node_data,
+            allow_missing_node_data_ids=allow_missing_node_data_ids,
+        )
         row = conn.execute(
             f"""
             update public.modelling_projects
@@ -566,7 +545,7 @@ def _upsert_by_id(items: List[Dict[str, Any]], item: Dict[str, Any]) -> List[Dic
 
 
 def _node_label_matches_variable(node: Dict[str, Any], variable: Dict[str, Any]) -> bool:
-    node_label = _as_text(node.get("label")).lower()
+    node_label = _as_text(node.get("node_title")).lower()
     variable_text = " ".join(
         _as_text(variable.get(key)).lower()
         for key in ("label", "name", "metric")
@@ -616,7 +595,7 @@ def _calculation_inputs_spec(input_node_ids: List[str], nodes: List[Dict[str, An
             {
                 "nodeId": input_node_id,
                 "nodeType": _as_text(node.get("nodeType")) or "unknown",
-                "label": _as_text(node.get("label")) or _as_text(variable.get("label")) or input_node_id,
+                "node_title": _as_text(node.get("node_title")) or _as_text(variable.get("label")) or input_node_id,
                 "variableId": _as_text(node.get("variableId")) or _as_text(variable.get("id")),
                 "sourceName": _as_text(variable.get("sourceName")),
                 "metric": _as_text(variable.get("metric")),
@@ -629,13 +608,13 @@ def _calculation_inputs_spec(input_node_ids: List[str], nodes: List[Dict[str, An
 def _build_calculation_spec(
     *,
     node_id: str,
-    label: str,
+    node_title: str,
     input_node_ids: List[str],
     output_label: str,
     output_node_id: str,
     expression: str,
     method: str,
-    assumption_text: str,
+    node_description: str,
     calculation_logic: Dict[str, Any],
     parameters: Dict[str, Any],
     nodes: List[Dict[str, Any]],
@@ -648,14 +627,14 @@ def _build_calculation_spec(
     language = _as_text(raw_logic.get("language") or replay.get("language"))
     steps = raw_logic.get("steps") or replay.get("steps")
     if not isinstance(steps, list):
-        steps = [_as_text(method) or _as_text(assumption_text) or _as_text(label)]
+        steps = [_as_text(method) or _as_text(node_description) or _as_text(node_title)]
 
     return {
         "version": 1,
         "kind": "custom_calculation",
         "nodeId": node_id,
-        "label": label,
-        "assumption": assumption_text,
+        "node_title": node_title,
+        "node_description": node_description,
         "method": method,
         "expression": expression,
         "inputs": _calculation_inputs_spec(input_node_ids, nodes, variables),
@@ -674,158 +653,17 @@ def _build_calculation_spec(
     }
 
 
-def _assumption_implies_custom_calculation(assumption: Dict[str, Any]) -> bool:
-    if _as_text(assumption.get("nodeId")) or isinstance(assumption.get("calculationLogic"), dict):
-        return True
-    text = " ".join(
-        _as_text(assumption.get(key)).lower()
-        for key in ("label", "valueText", "method", "logicSummary")
-    )
-    markers = (
-        "project",
-        "projection",
-        "forecast",
-        "scenario",
-        "continue",
-        "continues",
-        "average",
-        "growth",
-        "cagr",
-        "annualise",
-        "annualize",
-        "return to",
-        "hold",
-        "constant",
-    )
-    return any(marker in text for marker in markers)
-
-
-def _append_missing_custom_calculation_nodes(
-    *,
-    nodes: List[Dict[str, Any]],
-    edges: List[Dict[str, Any]],
-    assumptions: List[Dict[str, Any]],
-    variables: List[Dict[str, Any]],
-) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
-    updated_nodes = list(nodes)
-    updated_edges = list(edges)
-    updated_assumptions = list(assumptions)
-    existing_node_ids = {_as_text(node.get("id")) for node in updated_nodes}
-
-    for index, assumption in enumerate(updated_assumptions):
-        if not _assumption_implies_custom_calculation(assumption):
-            continue
-        node_id = _as_text(assumption.get("nodeId")) or _clean_id(f"{assumption.get('id')}_calculation", f"assumption_{index + 1}_calculation")
-        if node_id in existing_node_ids:
-            if not _as_text(assumption.get("nodeId")):
-                assumption["nodeId"] = node_id
-            continue
-
-        raw_inputs = _text_list(assumption.get("inputs"))
-        variable_id = _as_text(assumption.get("variableId"))
-        if not raw_inputs and variable_id:
-            raw_inputs = [variable_id]
-        input_node_ids = [
-            resolved
-            for resolved in (_resolve_input_node_id(input_id, updated_nodes, variables) for input_id in raw_inputs)
-            if resolved
-        ]
-        if not input_node_ids:
-            continue
-
-        source_node = next((node for node in updated_nodes if _as_text(node.get("id")) == input_node_ids[0]), {})
-        source_x = float(source_node.get("positionX") or 0)
-        source_y = float(source_node.get("positionY") or 0)
-        output_label = _as_text(assumption.get("output")) or _as_text(assumption.get("label")) or "Calculated result"
-        result_node_id = _clean_id(f"{node_id}_result", f"{node_id}_result")
-        params = assumption.get("parameters") if isinstance(assumption.get("parameters"), dict) else {}
-        logic = assumption.get("calculationLogic") if isinstance(assumption.get("calculationLogic"), dict) else {}
-        calculation_spec = _build_calculation_spec(
-            node_id=node_id,
-            label=_as_text(assumption.get("method")) or _as_text(assumption.get("label")) or "Custom calculation",
-            input_node_ids=input_node_ids,
-            output_label=output_label,
-            output_node_id=result_node_id,
-            expression=_as_text(assumption.get("method")) or "custom",
-            method=_as_text(assumption.get("method")),
-            assumption_text=_as_text(assumption.get("valueText")),
-            calculation_logic=logic,
-            parameters=params,
-            nodes=updated_nodes,
-            variables=variables,
-        )
-        calculation_node = _normalize_node(
-            {
-                "id": node_id,
-                "label": _as_text(assumption.get("method")) or _as_text(assumption.get("label")) or "Custom calculation",
-                "nodeType": "calculation",
-                "expression": _as_text(assumption.get("method")) or "custom",
-                "assumptionId": _as_text(assumption.get("id")),
-                "method": _as_text(assumption.get("method")),
-                "inputs": input_node_ids,
-                "output": output_label,
-                "logicSummary": _as_text(assumption.get("valueText")),
-                "parameters": params,
-                "calculationLogic": logic,
-                "calculationSpec": calculation_spec,
-                "positionX": source_x + 220,
-                "positionY": source_y,
-            },
-            len(updated_nodes),
-        )
-        updated_nodes.append(calculation_node)
-        existing_node_ids.add(node_id)
-        assumption["nodeId"] = node_id
-        assumption["calculationSpec"] = calculation_spec
-
-        for input_node_id in input_node_ids:
-            edge = {
-                "id": _edge_id(input_node_id, node_id),
-                "sourceNodeId": input_node_id,
-                "targetNodeId": node_id,
-            }
-            if not any(_as_text(item.get("id")) == edge["id"] for item in updated_edges if isinstance(item, dict)):
-                updated_edges.append(edge)
-
-        if result_node_id not in existing_node_ids:
-            updated_nodes.append(
-                _normalize_node(
-                    {
-                        "id": result_node_id,
-                        "label": output_label,
-                        "nodeType": "result",
-                        "logicSummary": _as_text(assumption.get("valueText")),
-                        "calculationSpec": calculation_spec,
-                        "positionX": source_x + 320,
-                        "positionY": source_y,
-                    },
-                    len(updated_nodes),
-                )
-            )
-            existing_node_ids.add(result_node_id)
-        result_edge = {
-            "id": _edge_id(node_id, result_node_id),
-            "sourceNodeId": node_id,
-            "targetNodeId": result_node_id,
-        }
-        if not any(_as_text(item.get("id")) == result_edge["id"] for item in updated_edges if isinstance(item, dict)):
-            updated_edges.append(result_edge)
-
-    return updated_nodes, updated_edges, updated_assumptions
-
-
 def save_custom_calculation_state(
     *,
     user_id: str,
     project_id: str,
     node_id: str,
-    label: str,
+    node_title: str,
     input_node_ids: List[str],
     output_label: str = "",
     expression: str = "",
     method: str = "",
-    assumption_text: str = "",
-    assumption_label: str = "",
+    node_description: str = "",
     calculation_logic: Optional[Dict[str, Any]] = None,
     parameters: Optional[Dict[str, Any]] = None,
     position_x: float | None = None,
@@ -835,11 +673,11 @@ def save_custom_calculation_state(
     project_id = _as_text(project_id)
     if not user_id or not project_id:
         raise RuntimeError("A Supabase user_id and project_id are required to save a custom calculation.")
-    clean_node_id = _clean_id(node_id or label or method, "custom_calculation")
+    clean_node_title = _as_text(node_title) or _as_text(method) or "Custom calculation"
+    clean_node_id = _clean_id(node_id or clean_node_title or method, "custom_calculation")
     current = fetch_model_builder_state(user_id=user_id, project_id=project_id)
     nodes = list(current.get("nodes") if isinstance(current.get("nodes"), list) else [])
     edges = list(current.get("edges") if isinstance(current.get("edges"), list) else [])
-    assumptions = list(current.get("assumptions") if isinstance(current.get("assumptions"), list) else [])
     variables = list(current.get("variables") if isinstance(current.get("variables"), list) else [])
     clean_input_node_ids = [
         resolved
@@ -850,20 +688,21 @@ def save_custom_calculation_state(
     if not clean_input_node_ids:
         raise RuntimeError("A custom calculation must include at least one input node id.")
 
-    clean_assumption_text = _as_text(assumption_text)
-    assumption_id = _clean_id(f"{clean_node_id}_assumption", f"{clean_node_id}_assumption") if clean_assumption_text else ""
     logic = calculation_logic if isinstance(calculation_logic, dict) else {}
     params = parameters if isinstance(parameters, dict) else {}
-    result_node_id = _clean_id(f"{clean_node_id}_result", f"{clean_node_id}_result") if _as_text(output_label) else ""
+    clean_node_description = _as_text(node_description)
+    if not clean_node_description:
+        raise RuntimeError("A custom calculation node must include an explicit description.")
+    clean_expression = _as_text(expression) or _as_text(method) or "custom"
     calculation_spec = _build_calculation_spec(
         node_id=clean_node_id,
-        label=_as_text(label) or _as_text(method) or "Custom calculation",
+        node_title=clean_node_title,
         input_node_ids=clean_input_node_ids,
         output_label=_as_text(output_label),
-        output_node_id=result_node_id,
-        expression=_as_text(expression) or _as_text(method) or "custom",
+        output_node_id="",
+        expression=clean_expression,
         method=_as_text(method),
-        assumption_text=clean_assumption_text,
+        node_description=clean_node_description,
         calculation_logic=logic,
         parameters=params,
         nodes=nodes,
@@ -871,25 +710,42 @@ def save_custom_calculation_state(
     )
     node: Dict[str, Any] = {
         "id": clean_node_id,
-        "label": _as_text(label) or _as_text(method) or "Custom calculation",
+        "node_title": clean_node_title,
+        "node_description": clean_node_description,
         "nodeType": "calculation",
-        "expression": _as_text(expression) or _as_text(method) or "custom",
+        "expression": clean_expression,
         "method": _as_text(method),
         "inputs": clean_input_node_ids,
         "output": _as_text(output_label),
-        "logicSummary": clean_assumption_text or _as_text(logic.get("summary")),
         "parameters": params,
         "calculationLogic": logic,
         "calculationSpec": calculation_spec,
     }
-    if assumption_id:
-        node["assumptionId"] = assumption_id
+    source_node = next((item for item in nodes if _as_text(item.get("id")) == clean_input_node_ids[0]), {})
+    source_x = float(source_node.get("positionX") or 0)
+    source_y = float(source_node.get("positionY") or 0)
     if position_x is not None:
         node["positionX"] = position_x
+    else:
+        node["positionX"] = source_x
     if position_y is not None:
         node["positionY"] = position_y
+    else:
+        node["positionY"] = source_y + 168
     nodes = _upsert_by_id(nodes, _normalize_node(node, len(nodes)))
     node_map = {_as_text(item.get("id")): item for item in nodes}
+    stale_result_node_ids = {
+        _as_text(item.get("id"))
+        for item in nodes
+        if _as_text(item.get("nodeType")) == "result"
+        and (
+            _as_text(item.get("sourceCalculationId")) == clean_node_id
+            or _as_text(item.get("id")) == _clean_id(f"{clean_node_id}_result", f"{clean_node_id}_result")
+        )
+    }
+    if stale_result_node_ids:
+        nodes = [item for item in nodes if _as_text(item.get("id")) not in stale_result_node_ids]
+        node_map = {_as_text(item.get("id")): item for item in nodes}
     edges = [
         edge
         for edge in edges
@@ -897,12 +753,8 @@ def save_custom_calculation_state(
             _as_text(edge.get("targetNodeId")) == clean_node_id
             and _as_text(edge.get("sourceNodeId")) not in clean_input_node_ids
         )
-        and not (
-            result_node_id
-            and _as_text(edge.get("sourceNodeId")) == clean_node_id
-            and _as_text(edge.get("targetNodeId")) != result_node_id
-            and _as_text(node_map.get(_as_text(edge.get("targetNodeId")), {}).get("nodeType")) == "result"
-        )
+        and _as_text(edge.get("sourceNodeId")) not in stale_result_node_ids
+        and _as_text(edge.get("targetNodeId")) not in stale_result_node_ids
     ]
 
     for input_node_id in clean_input_node_ids:
@@ -914,48 +766,14 @@ def save_custom_calculation_state(
         if not any(_as_text(item.get("id")) == edge["id"] for item in edges if isinstance(item, dict)):
             edges.append(edge)
 
-    if _as_text(output_label):
-        source_node = next((item for item in nodes if _as_text(item.get("id")) == clean_input_node_ids[0]), {})
-        result_node = {
-            "id": result_node_id,
-            "label": _as_text(output_label),
-            "nodeType": "result",
-            "logicSummary": clean_assumption_text or _as_text(logic.get("summary")),
-            "sourceCalculationId": clean_node_id,
-            "calculationSpec": calculation_spec,
-            "positionX": float(source_node.get("positionX") or 0) + 320,
-            "positionY": float(source_node.get("positionY") or 0),
-        }
-        nodes = _upsert_by_id(nodes, _normalize_node(result_node, len(nodes)))
-        result_edge = {
-            "id": _edge_id(clean_node_id, result_node_id),
-            "sourceNodeId": clean_node_id,
-            "targetNodeId": result_node_id,
-        }
-        if not any(_as_text(item.get("id")) == result_edge["id"] for item in edges if isinstance(item, dict)):
-            edges.append(result_edge)
-
-    if clean_assumption_text:
-        assumption = {
-            "id": assumption_id,
-            "nodeId": clean_node_id,
-            "label": _as_text(assumption_label) or clean_assumption_text,
-            "valueText": clean_assumption_text,
-            "method": _as_text(method),
-            "inputs": clean_input_node_ids,
-            "output": _as_text(output_label),
-            "parameters": params,
-            "calculationLogic": logic,
-            "calculationSpec": calculation_spec,
-            "logicSummary": clean_assumption_text,
-        }
-        assumptions = _upsert_by_id(assumptions, _normalize_assumption(assumption, len(assumptions)))
-        update_model_assumptions_state(user_id=user_id, project_id=project_id, assumptions=assumptions)
-
-    result = update_model_graph_state(user_id=user_id, project_id=project_id, nodes=nodes, edges=edges)
+    result = update_model_graph_state(
+        user_id=user_id,
+        project_id=project_id,
+        nodes=nodes,
+        edges=edges,
+        allow_missing_node_data_ids={clean_node_id},
+    )
     return {
         "model_builder_state": result["model_builder_state"],
         "calculation_node_id": clean_node_id,
-        "assumption_id": assumption_id,
-        "saved_assumption": bool(clean_assumption_text),
     }

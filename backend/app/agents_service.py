@@ -5,6 +5,7 @@ import copy
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from functools import lru_cache
+import hashlib
 import json
 import logging
 import re
@@ -24,6 +25,7 @@ from agents import (
     RetryPolicyContext,
     Runner,
     SQLiteSession,
+    WebSearchTool,
     function_tool,
     set_default_openai_key,
 )
@@ -37,10 +39,10 @@ from .config import get_settings
 from .model_builder import (
     fetch_model_builder_state,
     save_custom_calculation_state,
-    update_model_assumptions_state,
     update_model_builder_state,
     update_model_graph_state,
 )
+from .model_charts import build_model_node_chart
 from .project_memory import (
     compact_project_memory_after_run,
     fetch_project_chat_messages,
@@ -49,7 +51,16 @@ from .project_memory import (
     search_project_compact_memory,
 )
 from .storage import ConversationStore
-from .validated_variables import run_validated_variable_record, save_validated_variable_record
+from .validated_variables import (
+    apply_transformation_rows,
+    compact_validated_data_from_rows,
+    list_validated_variable_records,
+    run_validated_variable_record,
+    save_validated_variable_record,
+    validated_data_headers,
+    validated_data_latest_rows,
+    validated_data_rows,
+)
 
 
 settings = get_settings()
@@ -70,6 +81,14 @@ GPT_5_4_INPUT_PRICE_PER_MILLION = 2.50
 GPT_5_4_CACHED_INPUT_PRICE_PER_MILLION = 0.625
 GPT_5_4_OUTPUT_PRICE_PER_MILLION = 10.00
 AI_COST_SURCHARGE_RATE = 0.10
+SUPPORTED_OFFICIAL_CUSTOM_DATA_SOURCES = {
+    "ABS": ("abs", "abs.gov.au", "australian bureau of statistics", "data.api.abs.gov.au"),
+    "OECD": ("oecd", "sdmx.oecd.org"),
+    "World Bank": ("world bank", "worldbank", "api.worldbank.org"),
+    "IMF": ("imf", "imf.org"),
+    "RBA": ("rba", "reserve bank of australia", "rba.gov.au"),
+    "UN Comtrade": ("un comtrade", "comtrade", "comtradeapi.un.org"),
+}
 
 _CANCELLATION_LOCK = Lock()
 _CANCELLATION_EVENTS: Dict[str, Event] = {}
@@ -374,6 +393,7 @@ def _build_agent_input(
     user_input: str,
     project_memory: Dict[str, Any] | None,
     model_builder_state: Dict[str, Any] | None,
+    pending_validated_variable_candidate: Dict[str, Any] | None = None,
 ) -> str:
     memory_text = ""
     updated_at = None
@@ -388,9 +408,15 @@ def _build_agent_input(
             "use": "Continuity only; not source evidence.",
         }
     if isinstance(model_builder_state, dict):
-        context_payload["project_model_builder"] = {
-            "state": model_builder_state,
-            "use": "Current active variables, assumptions, and graph. Follow the agent system prompt routing rules.",
+        context_payload["project_canvas_context"] = {
+            "state": _lightweight_model_builder_state_for_context(model_builder_state),
+            "use": "Current visible executable notebook model. Read nodes top-to-bottom, then left-to-right. Use tools for full data, recalculation, refresh, or edits.",
+        }
+    pending_summary = _pending_validated_variable_candidate_summary(pending_validated_variable_candidate)
+    if pending_summary:
+        context_payload["pending_validated_variable_candidate"] = {
+            **pending_summary,
+            "use": "A compiled candidate is waiting for approval/save. If the user approves or says save it, call save_validated_variable without rediscovery or retrieval.",
         }
     if not context_payload:
         return user_input
@@ -401,6 +427,156 @@ def _build_agent_input(
         },
         ensure_ascii=False,
     )
+
+
+def _pending_validated_variable_candidate_summary(candidate: Dict[str, Any] | None) -> Dict[str, Any]:
+    if not isinstance(candidate, dict) or not candidate:
+        return {}
+    validated_data = candidate.get("validated_data") if isinstance(candidate.get("validated_data"), dict) else {}
+    summary: Dict[str, Any] = {
+        "compiled": True,
+        "name": _truncate(candidate.get("name") or "", 120),
+        "node_title": _truncate(candidate.get("node_title") or candidate.get("label") or "", 120),
+        "source_name": _truncate(candidate.get("source_name") or "", 120),
+        "compiled_at": candidate.get("compiled_at") or "",
+        "row_count": validated_data.get("row_count"),
+        "columns": validated_data.get("columns") if isinstance(validated_data.get("columns"), list) else [],
+    }
+    return {key: value for key, value in summary.items() if value not in ("", None, [], {})}
+
+
+def _compact_node_data_summary(entry: Dict[str, Any]) -> Dict[str, Any]:
+    records = entry.get("records") if isinstance(entry.get("records"), list) else []
+    columns = [str(item or "").strip() for item in (entry.get("columns") if isinstance(entry.get("columns"), list) else [])]
+    series = entry.get("series") if isinstance(entry.get("series"), list) else []
+    summary: Dict[str, Any] = {
+        "available": bool(entry),
+        "kind": entry.get("kind") or "",
+        "data_kind": entry.get("data_kind") or "",
+        "unit": entry.get("unit") or "",
+        "rows": len(records),
+        "series": len(series),
+        "computed_at": entry.get("computed_at") or "",
+    }
+    if records:
+        try:
+            x_index = columns.index("period") if "period" in columns else 0
+            y_index = columns.index("value") if "value" in columns else min(1, len(records[0]) - 1)
+            first = records[0]
+            latest = records[-1]
+            if isinstance(first, list) and isinstance(latest, list):
+                summary["range"] = {
+                    "start": first[x_index] if x_index < len(first) else "",
+                    "end": latest[x_index] if x_index < len(latest) else "",
+                }
+                summary["latest"] = {
+                    "x": latest[x_index] if x_index < len(latest) else "",
+                    "y": latest[y_index] if y_index < len(latest) else None,
+                }
+        except Exception:
+            pass
+    if series:
+        series_summaries = []
+        all_x_values: List[str] = []
+        for item in series[:6]:
+            if not isinstance(item, dict):
+                continue
+            points = item.get("points") if isinstance(item.get("points"), list) else []
+            all_x_values.extend(
+                str(point.get("x") or "").strip()
+                for point in points
+                if isinstance(point, dict) and str(point.get("x") or "").strip()
+            )
+            latest_point = points[-1] if points and isinstance(points[-1], dict) else {}
+            series_summaries.append(
+                {
+                    "name": str(item.get("name") or "").strip(),
+                    "points": len(points),
+                    "latest": {
+                        "x": latest_point.get("x") if isinstance(latest_point, dict) else "",
+                        "y": latest_point.get("y") if isinstance(latest_point, dict) else None,
+                    },
+                }
+            )
+        if series_summaries:
+            summary["series_summary"] = series_summaries
+        if all_x_values:
+            summary["range"] = {"start": all_x_values[0], "end": all_x_values[-1]}
+    return summary
+
+
+def _lightweight_model_builder_state_for_context(model_builder_state: Dict[str, Any]) -> Dict[str, Any]:
+    state = copy.deepcopy(model_builder_state)
+    variables = state.get("variables") if isinstance(state.get("variables"), list) else []
+    variable_by_id = {
+        str(variable.get("id") or "").strip(): variable
+        for variable in variables
+        if isinstance(variable, dict) and str(variable.get("id") or "").strip()
+    }
+    node_data = state.get("node_data") if isinstance(state.get("node_data"), dict) else {}
+    nodes = state.get("nodes") if isinstance(state.get("nodes"), list) else []
+    edges = state.get("edges") if isinstance(state.get("edges"), list) else []
+    node_titles = {
+        str(node.get("id") or "").strip(): str(node.get("node_title") or node.get("id") or "").strip()
+        for node in nodes
+        if isinstance(node, dict) and str(node.get("id") or "").strip()
+    }
+
+    ordered_nodes = sorted(
+        [node for node in nodes if isinstance(node, dict)],
+        key=lambda node: (float(node.get("positionY") or 0), float(node.get("positionX") or 0), str(node.get("id") or "")),
+    )
+    context_nodes: List[Dict[str, Any]] = []
+    for node in ordered_nodes:
+        node_id = str(node.get("id") or "").strip()
+        if not node_id:
+            continue
+        variable_id = str(node.get("variableId") or "").strip()
+        variable = variable_by_id.get(variable_id, {})
+        entry = node_data.get(node_id) if isinstance(node_data.get(node_id), dict) else {}
+        inputs = [
+            {"id": input_id, "title": node_titles.get(input_id, input_id)}
+            for input_id in ([str(item).strip() for item in node.get("inputs", [])] if isinstance(node.get("inputs"), list) else [])
+            if input_id
+        ]
+        if not inputs:
+            inputs = [
+                {"id": str(edge.get("sourceNodeId") or "").strip(), "title": node_titles.get(str(edge.get("sourceNodeId") or "").strip(), str(edge.get("sourceNodeId") or "").strip())}
+                for edge in edges
+                if isinstance(edge, dict) and str(edge.get("targetNodeId") or "").strip() == node_id and str(edge.get("sourceNodeId") or "").strip()
+            ]
+        context_node: Dict[str, Any] = {
+            "node_id": node_id,
+            "node_title": str(node.get("node_title") or node_id).strip(),
+            "type": str(node.get("nodeType") or "variable").strip(),
+            "node_description": str(node.get("node_description") or "").strip(),
+            "inputs": inputs,
+            "node_data": _compact_node_data_summary(entry),
+        }
+        if variable:
+            context_node["variable"] = {
+                "id": variable_id,
+                "source": variable.get("sourceName") or "",
+                "metric": variable.get("metric") or "",
+                "unit": variable.get("unit") or "",
+                "geography": variable.get("geography") or "",
+                "frequency": variable.get("frequency") or "",
+                "coverage": " to ".join(
+                    item for item in [str(variable.get("periodStart") or "").strip(), str(variable.get("periodEnd") or "").strip()] if item
+                ),
+            }
+        if str(node.get("nodeType") or "").strip() == "calculation":
+            context_node["calculation"] = {
+                "expression": node.get("expression") or "",
+                "method": node.get("method") or "",
+                "has_code": bool((node.get("calculationLogic") or {}).get("code")) if isinstance(node.get("calculationLogic"), dict) else False,
+            }
+        context_nodes.append(context_node)
+
+    return {
+        "ordering": "top_to_bottom_then_left_to_right",
+        "nodes": context_nodes,
+    }
 
 
 def _schedule_project_memory_compaction(
@@ -447,7 +623,11 @@ def report_progress(
     ctx: RunContextWrapper[AgentRuntimeContext],
     message: str,
 ) -> Dict[str, Any]:
-    """Send one short user-facing progress update."""
+    """Send one short user-facing progress update.
+
+    Use before/after meaningful steps, saves, graph updates, calculation refreshes, and pivots. Pass one
+    factual sentence; do not include hidden reasoning or a long status report.
+    """
     normalized = _truncate(message, 220)
     if normalized:
         ctx.context.status_callback(normalized)
@@ -460,7 +640,11 @@ def search_nisaba_project_memory(
     query: str,
     limit: int = 5,
 ) -> Dict[str, Any]:
-    """Search compact memories from the user's other Nisaba projects."""
+    """Search compact memories from the user's other Nisaba projects.
+
+    Use only for continuity about prior project choices, preferences, modelling judgement, or unresolved work.
+    Results are not source evidence and must not replace MCP retrieval or saved validated data.
+    """
     context = ctx.context
     results = search_project_compact_memory(
         user_id=context.user_id,
@@ -471,19 +655,93 @@ def search_nisaba_project_memory(
     return {
         "results": results,
         "result_count": len(results),
-        "instruction": (
-            "Use these compact Nisaba memories only for continuity about prior chats, modelling choices, "
-            "user preferences, assumptions, unresolved tasks, or validated-variable intent. "
-            "Use MCP retrieval and public-source evidence for economic facts, data values, and citations."
-        ),
+        "instruction": "Continuity only. Use saved variables, model cache, MCP retrieval, or public-source evidence for facts and data.",
     }
 
 
 @function_tool(strict_mode=False)
-def save_validated_variable(
+def list_validated_variables(
     ctx: RunContextWrapper[AgentRuntimeContext],
+    query: str = "",
+    limit: int = 25,
+) -> Dict[str, Any]:
+    """List validated variables so the agent can identify an existing target.
+
+    Use when the project context does not clearly identify the saved variable to inspect, update, replace,
+    duplicate, delete, or disambiguate. Results include active_project_count and active_projects; confirm
+    before editing a shared variable. If intent remains unclear, ask one short question.
+    """
+    context = ctx.context
+    return list_validated_variable_records(
+        user_id=context.user_id,
+        project_id=context.project_id,
+        query=query,
+        limit=limit,
+    )
+
+
+def _custom_data_official_source_match(
+    *,
+    source_name: str,
+    provider_id: str,
+    dataset_id: str,
+    validated_api_url: str,
+    retrieval_logic: Dict[str, Any],
+    custom_data: Dict[str, Any],
+) -> str:
+    text = "\n".join(
+        str(part or "").lower()
+        for part in (
+            source_name,
+            provider_id,
+            dataset_id,
+            validated_api_url,
+            json.dumps(retrieval_logic, ensure_ascii=False, default=str),
+            json.dumps(custom_data, ensure_ascii=False, default=str),
+        )
+    )
+    tokens = set(re.split(r"[^a-z0-9]+", text))
+    for label, markers in SUPPORTED_OFFICIAL_CUSTOM_DATA_SOURCES.items():
+        for marker in markers:
+            marker_text = marker.lower()
+            if " " in marker_text or "." in marker_text:
+                if marker_text in text:
+                    return label
+            elif marker_text in tokens:
+                return label
+    return ""
+
+
+def _assert_custom_data_path_is_allowed(
+    *,
+    source_name: str,
+    provider_id: str,
+    dataset_id: str,
+    validated_api_url: str,
+    retrieval_logic: Dict[str, Any],
+    custom_data: Dict[str, Any],
+) -> None:
+    matched_source = _custom_data_official_source_match(
+        source_name=source_name,
+        provider_id=provider_id,
+        dataset_id=dataset_id,
+        validated_api_url=validated_api_url,
+        retrieval_logic=retrieval_logic,
+        custom_data=custom_data,
+    )
+    if matched_source:
+        raise RuntimeError(
+            f"Do not save {matched_source} data as research/custom-only data. If the approved output is derived "
+            "from official source slices, pass custom_data as the approved final data plus evidence_artifact "
+            "pointing to the already narrowed MCP artifacts and executable transformation_logic.code."
+        )
+
+
+def _compile_validated_variable_candidate_payload(
+    *,
+    context: AgentRuntimeContext,
     name: str,
-    label: str = "",
+    node_title: str = "",
     source_name: str = "",
     provider_id: str = "",
     dataset_id: str = "",
@@ -499,37 +757,205 @@ def save_validated_variable(
     transformation_logic: Optional[Dict[str, Any]] = None,
     transform_summary: str = "",
     recreation_summary: str = "",
+    node_description: str = "",
+    custom_data: Optional[Dict[str, Any]] = None,
     evidence_artifact: Optional[Dict[str, Any]] = None,
     external_key: str = "",
 ) -> Dict[str, Any]:
-    """Save an approved metric as an active validated variable.
-
-    Include source identifiers, validated_api_url, executable retrieval/narrowing recipe,
-    transformation logic, validation metadata, and recreation_summary.
-    """
-    context = ctx.context
     retrieval_logic = retrieval_logic or {}
     transformation_logic = _with_default_identity_transform(transformation_logic or {})
+    custom_data = custom_data or {}
     evidence_artifact = evidence_artifact or {}
-    retrieval_logic, evidence_artifact = _merge_executed_validated_recipe(
-        context=context,
-        retrieval_logic=retrieval_logic,
-        evidence_artifact=evidence_artifact,
-    )
-    _assert_validated_variable_is_narrowed(context, retrieval_logic, evidence_artifact)
-    validated_api_url, validated_api_urls = _validated_api_urls_from_mcp_artifacts(
-        context=context,
-        current_url=validated_api_url,
+    official_source = _custom_data_official_source_match(
+        source_name=source_name,
+        provider_id=provider_id,
         dataset_id=dataset_id,
+        validated_api_url=validated_api_url,
         retrieval_logic=retrieval_logic,
-        evidence_artifact=evidence_artifact,
+        custom_data=custom_data,
     )
-    retrieval_logic = _stamp_validated_api_url_on_retrieve_steps(retrieval_logic, validated_api_url, validated_api_urls)
-    return save_validated_variable_record(
-        user_id=context.user_id,
-        project_id=context.project_id,
+    validate_refresh_execution = not official_source
+    if custom_data and official_source:
+        source_records = _narrowed_artifact_records_from_inputs(
+            context,
+            retrieval_logic,
+            evidence_artifact,
+            include_all_if_none=True,
+        )
+        if not source_records:
+            raise RuntimeError(
+                "Cannot save official-derived variable: no already narrowed MCP source artifacts are available. "
+                "Reuse the artifacts from the chart you just built; do not reretrieve only to save."
+            )
+        retrieval_logic, evidence_artifact = _executed_validated_recipe_from_narrowed_records(context, source_records)
+        validated_api_url, validated_api_urls = _validated_api_urls_from_mcp_artifacts(
+            context=context,
+            current_url=validated_api_url,
+            dataset_id=dataset_id,
+            retrieval_logic=retrieval_logic,
+            evidence_artifact=evidence_artifact,
+        )
+        retrieval_logic = _stamp_validated_api_url_on_retrieve_steps(retrieval_logic, validated_api_url, validated_api_urls)
+        validated_data = _compact_official_derived_data_from_custom_data(
+            variable_name=name or node_title,
+            custom_data=custom_data,
+            transformation_logic=transformation_logic,
+            source={
+                "source_name": official_source,
+                "api_request_urls": validated_api_urls,
+                "artifact_trail": evidence_artifact.get("artifact_trail") if isinstance(evidence_artifact.get("artifact_trail"), list) else [],
+            },
+        )
+        _assert_official_derived_transform_matches_approved_data(
+            context=context,
+            records=source_records,
+            variable_name=name or node_title,
+            transformation_logic=transformation_logic,
+            approved_data=validated_data,
+        )
+        refresh_metadata = _refresh_metadata_from_retrieval_logic(
+            name=name or node_title,
+            validated_api_url=validated_api_url,
+            retrieval_logic=retrieval_logic,
+            transformation_logic=transformation_logic,
+            transform_summary=transform_summary,
+            recreation_summary=recreation_summary,
+        )
+        refresh_code = _refresh_code_from_metadata(refresh_metadata)
+    elif custom_data:
+        _assert_custom_data_path_is_allowed(
+            source_name=source_name,
+            provider_id=provider_id,
+            dataset_id=dataset_id,
+            validated_api_url=validated_api_url,
+            retrieval_logic=retrieval_logic,
+            custom_data=custom_data,
+        )
+        retrieval_logic = _research_retrieval_logic_from_custom_data(
+            name=name or node_title,
+            retrieval_logic=retrieval_logic,
+            custom_data=custom_data,
+        )
+        evidence_artifact = _research_evidence_from_custom_data(custom_data)
+        validated_data = _compact_validated_data_from_custom_data(
+            variable_name=name or node_title,
+            custom_data=custom_data,
+            transformation_logic=transformation_logic,
+        )
+        validated_api_url = _research_validated_url(
+            name=name or node_title,
+            custom_data=custom_data,
+            current_url=validated_api_url,
+        )
+        refresh_metadata = _research_refresh_metadata(
+            name=name or node_title,
+            validated_api_url=validated_api_url,
+            retrieval_logic=retrieval_logic,
+            transformation_logic=transformation_logic,
+            transform_summary=transform_summary,
+            recreation_summary=recreation_summary,
+            custom_data=custom_data,
+        )
+        refresh_code = _research_refresh_code_from_metadata(refresh_metadata, validated_data)
+    else:
+        retrieval_logic, evidence_artifact = _merge_executed_validated_recipe(
+            context=context,
+            retrieval_logic=retrieval_logic,
+            evidence_artifact=evidence_artifact,
+        )
+        _assert_validated_variable_is_narrowed(context, retrieval_logic, evidence_artifact)
+        narrowed_record = _narrowed_artifact_record_from_inputs(context, retrieval_logic, evidence_artifact)
+        if not isinstance(narrowed_record, dict):
+            raise RuntimeError("Cannot save validated variable: no exact narrowed artifact is selected for compact data storage.")
+        validated_data = _compact_validated_data_from_artifact_record(
+            context=context,
+            record=narrowed_record,
+            variable_name=name or node_title,
+            transformation_logic=transformation_logic,
+        )
+        validated_api_url, validated_api_urls = _validated_api_urls_from_mcp_artifacts(
+            context=context,
+            current_url=validated_api_url,
+            dataset_id=dataset_id,
+            retrieval_logic=retrieval_logic,
+            evidence_artifact=evidence_artifact,
+        )
+        retrieval_logic = _stamp_validated_api_url_on_retrieve_steps(retrieval_logic, validated_api_url, validated_api_urls)
+        refresh_metadata = _refresh_metadata_from_retrieval_logic(
+            name=name or node_title,
+            validated_api_url=validated_api_url,
+            retrieval_logic=retrieval_logic,
+            transformation_logic=transformation_logic,
+            transform_summary=transform_summary,
+            recreation_summary=recreation_summary,
+        )
+        refresh_code = _refresh_code_from_metadata(refresh_metadata)
+    return {
+        "name": name,
+        "label": node_title,
+        "node_title": node_title,
+        "source_name": source_name,
+        "provider_id": provider_id,
+        "dataset_id": dataset_id,
+        "metric": metric,
+        "unit": unit,
+        "geography": geography,
+        "frequency": frequency,
+        "seasonal_treatment": seasonal_treatment,
+        "period_start": period_start,
+        "period_end": period_end,
+        "validated_api_url": validated_api_url,
+        "retrieval_logic": retrieval_logic,
+        "transformation_logic": transformation_logic,
+        "transform_summary": transform_summary,
+        "recreation_summary": recreation_summary,
+        "node_description": node_description,
+        "validated_data": validated_data,
+        "refresh_code": refresh_code,
+        "refresh_metadata": refresh_metadata,
+        "evidence_artifact": evidence_artifact,
+        "external_key": external_key,
+        "validate_refresh_execution": validate_refresh_execution,
+    }
+
+
+@function_tool(strict_mode=False)
+def compile_validated_variable_candidate(
+    ctx: RunContextWrapper[AgentRuntimeContext],
+    name: str,
+    node_title: str = "",
+    source_name: str = "",
+    provider_id: str = "",
+    dataset_id: str = "",
+    metric: str = "",
+    unit: str = "",
+    geography: str = "",
+    frequency: str = "",
+    seasonal_treatment: str = "",
+    period_start: str = "",
+    period_end: str = "",
+    validated_api_url: str = "",
+    retrieval_logic: Optional[Dict[str, Any]] = None,
+    transformation_logic: Optional[Dict[str, Any]] = None,
+    transform_summary: str = "",
+    recreation_summary: str = "",
+    node_description: str = "",
+    custom_data: Optional[Dict[str, Any]] = None,
+    evidence_artifact: Optional[Dict[str, Any]] = None,
+    external_key: str = "",
+) -> Dict[str, Any]:
+    """Compile the current approved candidate variable from MCP artifacts and transform code.
+
+    Use after MCP discover/retrieve/inspect/narrow/transform and before asking the user to approve/save a
+    variable. This is the final MCP workflow step: it reuses current narrowed artifacts, stores the approved
+    compact data, executable refresh_code, retrieval_logic, transformation_logic, metadata, and node text as
+    a pending package. Do not reretrieve source data to compile.
+    """
+    context = ctx.context
+    compiled = _compile_validated_variable_candidate_payload(
+        context=context,
         name=name,
-        label=label,
+        node_title=node_title,
         source_name=source_name,
         provider_id=provider_id,
         dataset_id=dataset_id,
@@ -545,9 +971,138 @@ def save_validated_variable(
         transformation_logic=transformation_logic,
         transform_summary=transform_summary,
         recreation_summary=recreation_summary,
+        node_description=node_description,
+        custom_data=custom_data,
         evidence_artifact=evidence_artifact,
         external_key=external_key,
     )
+    state = context.store.load(context.conversation_id)
+    state.pending_validated_variable_candidate = {
+        **_coerce_jsonable(compiled),
+        "compiled_at": datetime.now(timezone.utc).isoformat(),
+        "source_artifact_ids": _artifact_ids_from_value(compiled.get("evidence_artifact")),
+    }
+    context.store.save(state)
+    return {
+        "compiled": True,
+        "name": compiled.get("name"),
+        "node_title": compiled.get("node_title") or compiled.get("label"),
+        "row_count": (compiled.get("validated_data") or {}).get("row_count"),
+        "columns": (compiled.get("validated_data") or {}).get("columns"),
+        "instruction": "Candidate compiled. If the user approves, call save_validated_variable with no reretrieval.",
+    }
+
+
+@function_tool(strict_mode=False)
+def save_validated_variable(
+    ctx: RunContextWrapper[AgentRuntimeContext],
+    name: str = "",
+    node_title: str = "",
+    source_name: str = "",
+    provider_id: str = "",
+    dataset_id: str = "",
+    metric: str = "",
+    unit: str = "",
+    geography: str = "",
+    frequency: str = "",
+    seasonal_treatment: str = "",
+    period_start: str = "",
+    period_end: str = "",
+    validated_api_url: str = "",
+    retrieval_logic: Optional[Dict[str, Any]] = None,
+    transformation_logic: Optional[Dict[str, Any]] = None,
+    transform_summary: str = "",
+    recreation_summary: str = "",
+    node_description: str = "",
+    custom_data: Optional[Dict[str, Any]] = None,
+    evidence_artifact: Optional[Dict[str, Any]] = None,
+    external_key: str = "",
+    update_variable_id: str = "",
+    allow_shared_update: bool = False,
+) -> Dict[str, Any]:
+    """Persist the approved compiled validated-variable candidate.
+
+    Prefer saving the pending package from compile_validated_variable_candidate. Use full arguments only when
+    compiling and saving in one call. Never reretrieve source data just to save after the user approves.
+    """
+    context = ctx.context
+    state = context.store.load(context.conversation_id)
+    has_supplied_candidate = bool(custom_data or retrieval_logic or evidence_artifact)
+    pending = state.pending_validated_variable_candidate if isinstance(state.pending_validated_variable_candidate, dict) else {}
+    if pending and not has_supplied_candidate:
+        compiled = dict(pending)
+        if name:
+            compiled["name"] = name
+        if node_title:
+            compiled["label"] = node_title
+            compiled["node_title"] = node_title
+        if node_description:
+            compiled["node_description"] = node_description
+    elif not has_supplied_candidate:
+        raise RuntimeError(
+            "No compiled validated-variable candidate is pending. Compile the approved candidate from the current MCP artifacts before saving."
+        )
+    else:
+        compiled = _compile_validated_variable_candidate_payload(
+            context=context,
+            name=name,
+            node_title=node_title,
+            source_name=source_name,
+            provider_id=provider_id,
+            dataset_id=dataset_id,
+            metric=metric,
+            unit=unit,
+            geography=geography,
+            frequency=frequency,
+            seasonal_treatment=seasonal_treatment,
+            period_start=period_start,
+            period_end=period_end,
+            validated_api_url=validated_api_url,
+            retrieval_logic=retrieval_logic,
+            transformation_logic=transformation_logic,
+            transform_summary=transform_summary,
+            recreation_summary=recreation_summary,
+            node_description=node_description,
+            custom_data=custom_data,
+            evidence_artifact=evidence_artifact,
+            external_key=external_key,
+        )
+    result = save_validated_variable_record(
+        user_id=context.user_id,
+        project_id=context.project_id,
+        name=str(compiled.get("name") or ""),
+        label=str(compiled.get("label") or compiled.get("node_title") or ""),
+        source_name=str(compiled.get("source_name") or ""),
+        provider_id=str(compiled.get("provider_id") or ""),
+        dataset_id=str(compiled.get("dataset_id") or ""),
+        metric=str(compiled.get("metric") or ""),
+        unit=str(compiled.get("unit") or ""),
+        geography=str(compiled.get("geography") or ""),
+        frequency=str(compiled.get("frequency") or ""),
+        seasonal_treatment=str(compiled.get("seasonal_treatment") or ""),
+        period_start=str(compiled.get("period_start") or ""),
+        period_end=str(compiled.get("period_end") or ""),
+        validated_api_url=str(compiled.get("validated_api_url") or ""),
+        retrieval_logic=compiled.get("retrieval_logic") if isinstance(compiled.get("retrieval_logic"), dict) else {},
+        transformation_logic=compiled.get("transformation_logic") if isinstance(compiled.get("transformation_logic"), dict) else {},
+        transform_summary=str(compiled.get("transform_summary") or ""),
+        recreation_summary=str(compiled.get("recreation_summary") or ""),
+        node_description=str(compiled.get("node_description") or ""),
+        validated_data=compiled.get("validated_data") if isinstance(compiled.get("validated_data"), dict) else {},
+        refresh_code=str(compiled.get("refresh_code") or ""),
+        refresh_metadata=compiled.get("refresh_metadata") if isinstance(compiled.get("refresh_metadata"), dict) else {},
+        evidence_artifact=compiled.get("evidence_artifact") if isinstance(compiled.get("evidence_artifact"), dict) else {},
+        external_key=str(compiled.get("external_key") or external_key or ""),
+        update_variable_id=update_variable_id,
+        allow_shared_update=allow_shared_update,
+        validate_refresh_execution=bool(compiled.get("validate_refresh_execution", True)),
+    )
+    if result.get("saved"):
+        state = context.store.load(context.conversation_id)
+        state.pending_validated_variable_candidate = None
+        context.store.save(state)
+        _clear_heavy_validation_context(context)
+    return result
 
 
 @function_tool(strict_mode=False)
@@ -556,8 +1111,15 @@ def run_validated_variable(
     variable_id: str = "",
     external_key: str = "",
     name: str = "",
+    refresh: bool = False,
 ) -> Dict[str, Any]:
-    """Replay an active validated variable by id, external_key, or name."""
+    """Return saved compact data for an active validated variable by id, external_key, or name.
+
+    Use refresh=False to inspect, show, or calculate from stored validated_data only. Do not describe this
+    as replaying and do not rewrite state. Use refresh=True only to rerun the same approved refresh_code
+    from source; changing scope, history, frequency, filters, transformation, notes, or definition is a
+    variable revision that must be re-approved and saved.
+    """
     context = ctx.context
     return run_validated_variable_record(
         user_id=context.user_id,
@@ -567,6 +1129,28 @@ def run_validated_variable(
         variable_id=variable_id,
         external_key=external_key,
         name=name,
+        refresh=refresh,
+    )
+
+
+@function_tool(strict_mode=False)
+def run_model_node_calculation(
+    ctx: RunContextWrapper[AgentRuntimeContext],
+    node_id: str,
+    refresh: bool = False,
+) -> Dict[str, Any]:
+    """Return or refresh saved node_data for a model graph node.
+
+    Use refresh=False to inspect the saved node_data. Use refresh=True only when the user asks to refresh
+    a calculation or after changing a node's inputs/calculation code. Missing node_data for a visible node
+    is a model integrity error; fix the save/update that failed to write it.
+    """
+    context = ctx.context
+    return build_model_node_chart(
+        user_id=context.user_id,
+        project_id=context.project_id,
+        node_id=node_id,
+        refresh=refresh,
     )
 
 
@@ -574,49 +1158,68 @@ def run_validated_variable(
 def save_custom_calculation(
     ctx: RunContextWrapper[AgentRuntimeContext],
     node_id: str,
-    label: str,
+    node_title: str,
     input_node_ids: List[str],
     output_label: str = "",
     expression: str = "",
     method: str = "",
-    assumption_text: str = "",
-    assumption_label: str = "",
+    node_description: str = "",
     calculation_logic: Optional[Dict[str, Any]] = None,
     parameters: Optional[Dict[str, Any]] = None,
     position_x: Optional[float] = None,
     position_y: Optional[float] = None,
 ) -> Dict[str, Any]:
-    """Save a custom calculation node and its linked assumption when the calculation uses model judgement.
+    """Save a custom calculation node, visible description, executable logic, and node_data.
 
-    Use this for scenario, projection, judgement-based, or non-obvious calculations. For simple arithmetic
-    such as +, -, /, or x between existing variables, update the graph normally and leave assumption_text empty.
-    Always pass every input node id, the output label, parameters, and replayable calculation_logic with
-    formula/code/steps sufficient to recreate the calculation later.
+    Use for projections, scenarios, judgement-based transformations, non-obvious calculations, and named
+    arithmetic outputs. Pass node_id, node_title, node_description, exact input node ids, parameters, and
+    calculation_logic.code. calculation_logic.code must define calculate(inputs, parameters) and return
+    chartable points. node_description is the single explanation the user and model both see; it must embed
+    the calculation and any modelling judgement together. Aim for 50 words, use up to 75 when needed, never
+    more than 100. Do not create standalone symbol nodes; the named calculation node is the output and owns
+    its inputs/expression/node_data. Saving runs the calculation immediately and stores chart-ready node_data.
     """
     context = ctx.context
-    result = save_custom_calculation_state(
-        user_id=context.user_id,
-        project_id=context.project_id,
-        node_id=node_id,
-        label=label,
-        input_node_ids=input_node_ids,
-        output_label=output_label,
-        expression=expression,
-        method=method,
-        assumption_text=assumption_text,
-        assumption_label=assumption_label,
-        calculation_logic=calculation_logic,
-        parameters=parameters,
-        position_x=position_x,
-        position_y=position_y,
-    )
+    previous_state = fetch_model_builder_state(user_id=context.user_id, project_id=context.project_id)
+    try:
+        result = save_custom_calculation_state(
+            user_id=context.user_id,
+            project_id=context.project_id,
+            node_id=node_id,
+            node_title=node_title,
+            input_node_ids=input_node_ids,
+            output_label=output_label,
+            expression=expression,
+            method=method,
+            node_description=node_description,
+            calculation_logic=calculation_logic,
+            parameters=parameters,
+            position_x=position_x,
+            position_y=position_y,
+        )
+        node_data = build_model_node_chart(
+            user_id=context.user_id,
+            project_id=context.project_id,
+            node_id=result["calculation_node_id"],
+            refresh=True,
+        )
+    except Exception:
+        if previous_state:
+            update_model_graph_state(
+                user_id=context.user_id,
+                project_id=context.project_id,
+                variables=previous_state.get("variables") if isinstance(previous_state.get("variables"), list) else [],
+                nodes=previous_state.get("nodes") if isinstance(previous_state.get("nodes"), list) else [],
+                edges=previous_state.get("edges") if isinstance(previous_state.get("edges"), list) else [],
+            )
+        raise
     return {
         "updated": True,
         **result,
+        "node_data": node_data,
         "instruction": (
-            "The custom calculation is saved in the graph with replayable calculation details. If an "
-            "assumption was supplied, it is linked to the calculation node and should be described to "
-            "the user in one short sentence."
+            "The custom calculation is saved as one graph node with replayable calculation details, "
+            "a concise node_description, and saved node_data."
         ),
     }
 
@@ -626,7 +1229,12 @@ def update_model_builder(
     ctx: RunContextWrapper[AgentRuntimeContext],
     model_builder_state: Dict[str, Any],
 ) -> Dict[str, Any]:
-    """Replace the complete model-builder state: variables, assumptions, nodes, and edges."""
+    """Replace the complete model-builder state: variables, nodes, and edges.
+
+    Use only when a full replacement is intended. Prefer update_model_graph for graph-only edits.
+    Preserve existing stable node ids and all valid links unless the user explicitly asks to restructure the
+    model. Every visible node must include node_title, node_description, valid edges, and saved node_data.
+    """
     context = ctx.context
     result = update_model_builder_state(
         user_id=context.user_id,
@@ -641,25 +1249,6 @@ def update_model_builder(
 
 
 @function_tool(strict_mode=False)
-def update_model_assumptions(
-    ctx: RunContextWrapper[AgentRuntimeContext],
-    assumptions: List[Dict[str, Any]],
-) -> Dict[str, Any]:
-    """Replace only the project's model assumptions."""
-    context = ctx.context
-    result = update_model_assumptions_state(
-        user_id=context.user_id,
-        project_id=context.project_id,
-        assumptions=assumptions,
-    )
-    return {
-        "updated": True,
-        **result,
-        "instruction": "The right-pane assumptions have been updated for this project.",
-    }
-
-
-@function_tool(strict_mode=False)
 def update_model_graph(
     ctx: RunContextWrapper[AgentRuntimeContext],
     nodes: List[Dict[str, Any]],
@@ -668,8 +1257,19 @@ def update_model_graph(
 ) -> Dict[str, Any]:
     """Replace only the model graph and, when supplied, active validated-variable links.
 
-    Calculation nodes should include inputs listing the exact upstream node ids used by the maths. The backend
-    treats those inputs as authoritative and repairs incoming arrows to match them.
+    Use for graph-only edits: visible nodes, edges, and optional active variable links. Treat links as core
+    executable model structure. Preserve existing stable node ids, node_data ids, inputs, and edges unless
+    the user explicitly asks to restructure those relationships. Never replace semantic ids with generated
+    node-1/node-2 style ids. Calculation/output nodes must include exact upstream input ids, and edges must
+    mirror those inputs. Simple arithmetic may use expression plus inputs on the named output node itself.
+    Projections, annualisation, filters, transformations, scenarios, and aggregations need
+    calculationLogic.code defining calculate(inputs, parameters). Every visible node must include
+    node_title and node_description. For every calculation node, node_description must state both what
+    the node calculates and the assumption that makes that calculation valid. If the same assumption
+    applies across multiple nodes, reuse the same wording for that assumption. Aim for 50 words, use up
+    to 75 when needed, never more than 100.
+    Do not create standalone symbol nodes. If graph changes alter executable calculation logic, refresh the
+    affected calculation node so its node_data is current.
     """
     context = ctx.context
     result = update_model_graph_state(
@@ -738,12 +1338,15 @@ def _build_agent(code_container_id: str) -> Agent[Any]:
         tools=[
             report_progress,
             search_nisaba_project_memory,
+            list_validated_variables,
+            compile_validated_variable_candidate,
             save_validated_variable,
             run_validated_variable,
+            run_model_node_calculation,
             save_custom_calculation,
             update_model_builder,
-            update_model_assumptions,
             update_model_graph,
+            WebSearchTool(search_context_size="medium"),
             CodeInterpreterTool(
                 tool_config={
                     "type": "code_interpreter",
@@ -1181,16 +1784,24 @@ def _with_default_identity_transform(transformation_logic: Dict[str, Any]) -> Di
     return normalized
 
 
-def _executed_validated_recipe_from_latest_narrowed(
+def _artifact_chain_evidence_payload(state: Any, narrowed_record: Dict[str, Any], parent_record: Dict[str, Any]) -> Dict[str, Any]:
+    narrowed_evidence = _artifact_evidence_payload(state, narrowed_record)
+    raw_evidence = _artifact_evidence_payload(state, parent_record)
+    artifact_trail = []
+    if raw_evidence:
+        artifact_trail.append({"role": "retrieve", **raw_evidence})
+    if narrowed_evidence:
+        artifact_trail.append({"role": "narrow_artifact", **narrowed_evidence})
+    if artifact_trail:
+        narrowed_evidence["artifact_trail"] = artifact_trail
+    return narrowed_evidence
+
+
+def _executed_validated_recipe_from_narrowed_record(
     context: AgentRuntimeContext,
+    narrowed_record: Dict[str, Any],
 ) -> tuple[Dict[str, Any], Dict[str, Any]]:
     state = context.store.load(context.conversation_id)
-    narrowed_record = _latest_narrowed_artifact_record(state)
-    if not isinstance(narrowed_record, dict):
-        raise RuntimeError(
-            "Cannot save validated variable: no narrowed MCP artifact is available in this conversation. "
-            "Run inspect_artifact and narrow_artifact, show the narrowed preview, then save after approval."
-        )
     parent_artifact_id = str(narrowed_record.get("parent_artifact_id") or "").strip()
     parent_record = _artifact_record_by_id(state, parent_artifact_id) if parent_artifact_id else None
     if not isinstance(parent_record, dict):
@@ -1245,7 +1856,131 @@ def _executed_validated_recipe_from_latest_narrowed(
         if value:
             retrieval_logic["provenance"][key] = value
 
-    return retrieval_logic, _artifact_evidence_payload(state, narrowed_record)
+    return retrieval_logic, _artifact_chain_evidence_payload(state, narrowed_record, parent_record)
+
+
+def _narrowed_artifact_record_from_inputs(
+    context: AgentRuntimeContext,
+    retrieval_logic: Dict[str, Any],
+    evidence_artifact: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    state = context.store.load(context.conversation_id)
+    for artifact_id in _artifact_ids_from_value(evidence_artifact) + _artifact_ids_from_value(retrieval_logic):
+        record = _artifact_record_by_id(state, artifact_id)
+        if isinstance(record, dict) and "narrowed" in str(record.get("kind") or "").strip():
+            return record
+    return None
+
+
+def _narrowed_artifact_records_from_inputs(
+    context: AgentRuntimeContext,
+    retrieval_logic: Dict[str, Any],
+    evidence_artifact: Dict[str, Any],
+    *,
+    include_all_if_none: bool = False,
+) -> List[Dict[str, Any]]:
+    state = context.store.load(context.conversation_id)
+    records: List[Dict[str, Any]] = []
+
+    def add(record: Optional[Dict[str, Any]]) -> None:
+        if not isinstance(record, dict) or "narrowed" not in str(record.get("kind") or "").strip():
+            return
+        artifact_id = str(record.get("artifact_id") or "").strip()
+        if artifact_id and all(str(item.get("artifact_id") or "").strip() != artifact_id for item in records):
+            records.append(record)
+
+    for artifact_id in _artifact_ids_from_value(evidence_artifact) + _artifact_ids_from_value(retrieval_logic):
+        add(_artifact_record_by_id(state, artifact_id))
+    if records or not include_all_if_none:
+        return records
+    for item in getattr(state, "artifacts", []) or []:
+        add(item if isinstance(item, dict) else None)
+    return records
+
+
+def _executed_validated_recipe_from_narrowed_records(
+    context: AgentRuntimeContext,
+    narrowed_records: List[Dict[str, Any]],
+) -> tuple[Dict[str, Any], Dict[str, Any]]:
+    state = context.store.load(context.conversation_id)
+    steps: List[Dict[str, Any]] = []
+    artifact_trail: List[Dict[str, Any]] = []
+    api_urls: List[str] = []
+    provenance_sources: List[Dict[str, str]] = []
+    for index, narrowed_record in enumerate(narrowed_records, start=1):
+        parent_artifact_id = str(narrowed_record.get("parent_artifact_id") or "").strip()
+        parent_record = _artifact_record_by_id(state, parent_artifact_id) if parent_artifact_id else None
+        if not isinstance(parent_record, dict):
+            raise RuntimeError(
+                "Cannot save official-derived variable: every narrowed source artifact must link back to its retrieve artifact."
+            )
+        retrieve_call = _tool_call_from_record_or_trace(context, parent_record, "retrieve")
+        narrow_call = _tool_call_from_record_or_trace(context, narrowed_record, "narrow_artifact")
+        retrieve_args = retrieve_call.get("args") if isinstance(retrieve_call.get("args"), dict) else {}
+        narrow_args = narrow_call.get("args") if isinstance(narrow_call.get("args"), dict) else {}
+        if str(retrieve_call.get("tool_name") or "").strip() != "retrieve" or not retrieve_args:
+            raise RuntimeError("Cannot save official-derived variable: an executed retrieve call is missing from the trace.")
+        if str(narrow_call.get("tool_name") or "").strip() != "narrow_artifact" or not narrow_args:
+            raise RuntimeError("Cannot save official-derived variable: an executed narrow_artifact call is missing from the trace.")
+        source_id = f"source_{index}"
+        steps.extend(
+            [
+                {
+                    "id": f"retrieve_{index}",
+                    "tool": "retrieve",
+                    "args": json.loads(json.dumps(retrieve_args, ensure_ascii=False)),
+                    "source_id": source_id,
+                },
+                {
+                    "id": f"narrow_{index}",
+                    "tool": "narrow_artifact",
+                    "args": _replace_artifact_arg_with_latest(narrow_args),
+                    "source_id": source_id,
+                },
+            ]
+        )
+        for url in _artifact_api_request_urls(state, narrowed_record):
+            if url not in api_urls:
+                api_urls.append(url)
+        artifact_trail.extend(_artifact_chain_evidence_payload(state, narrowed_record, parent_record).get("artifact_trail", []))
+        provenance_sources.append(
+            {
+                "source_id": source_id,
+                "raw_artifact_id": str(parent_record.get("artifact_id") or "").strip(),
+                "narrowed_artifact_id": str(narrowed_record.get("artifact_id") or "").strip(),
+                "retrieve_call_id": str(retrieve_call.get("call_id") or "").strip(),
+                "narrow_call_id": str(narrow_call.get("call_id") or "").strip(),
+            }
+        )
+    return (
+        {
+            "version": 1,
+            "source": "executed_mcp_recipe",
+            "steps": steps,
+            "api_request_urls": api_urls,
+            "validated_api_url": api_urls[0] if api_urls else "",
+            "provenance": {"sources": provenance_sources},
+        },
+        {
+            "kind": "official_derived",
+            "artifact_trail": artifact_trail,
+            "api_request_urls": api_urls,
+            "api_request_url": api_urls[0] if api_urls else "",
+        },
+    )
+
+
+def _executed_validated_recipe_from_latest_narrowed(
+    context: AgentRuntimeContext,
+) -> tuple[Dict[str, Any], Dict[str, Any]]:
+    state = context.store.load(context.conversation_id)
+    narrowed_record = _latest_narrowed_artifact_record(state)
+    if not isinstance(narrowed_record, dict):
+        raise RuntimeError(
+            "Cannot save validated variable: no narrowed MCP artifact is available in this conversation. "
+            "Run inspect_artifact and narrow_artifact, show the narrowed preview, then save after approval."
+        )
+    return _executed_validated_recipe_from_narrowed_record(context, narrowed_record)
 
 
 def _merge_executed_validated_recipe(
@@ -1254,13 +1989,14 @@ def _merge_executed_validated_recipe(
     retrieval_logic: Dict[str, Any],
     evidence_artifact: Dict[str, Any],
 ) -> tuple[Dict[str, Any], Dict[str, Any]]:
-    try:
+    selected_narrowed_record = _narrowed_artifact_record_from_inputs(context, retrieval_logic, evidence_artifact)
+    if isinstance(selected_narrowed_record, dict):
+        executed_retrieval_logic, executed_evidence_artifact = _executed_validated_recipe_from_narrowed_record(
+            context,
+            selected_narrowed_record,
+        )
+    else:
         executed_retrieval_logic, executed_evidence_artifact = _executed_validated_recipe_from_latest_narrowed(context)
-    except RuntimeError:
-        if retrieval_logic or evidence_artifact:
-            return retrieval_logic, evidence_artifact
-        raise
-
     merged_retrieval_logic = dict(executed_retrieval_logic)
     supplied_recreation = str((retrieval_logic or {}).get("recreation_summary") or "").strip()
     if supplied_recreation:
@@ -1271,6 +2007,505 @@ def _merge_executed_validated_recipe(
             if value not in ("", [], {}, None) and key not in merged_evidence_artifact:
                 merged_evidence_artifact[key] = value
     return merged_retrieval_logic, merged_evidence_artifact
+
+
+def _data_sort_key(row: Dict[str, Any]) -> str:
+    for key in ("observationKey", "x", "TIME_PERIOD", "TIME"):
+        value = str(row.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _rows_as_dicts(headers: List[str], rows: List[List[Any]]) -> List[Dict[str, Any]]:
+    return [
+        {headers[index]: row[index] for index in range(min(len(headers), len(row)))}
+        for row in rows
+    ]
+
+
+def _custom_data_rows_and_headers(custom_data: Dict[str, Any]) -> tuple[List[str], List[Dict[str, Any]]]:
+    rows = custom_data.get("rows")
+    if isinstance(rows, list) and all(isinstance(row, dict) for row in rows):
+        headers: List[str] = []
+        for row in rows:
+            for key in row.keys():
+                text_key = str(key)
+                if text_key not in headers:
+                    headers.append(text_key)
+        return headers, [dict(row) for row in rows]
+
+    columns = [str(item).strip() for item in custom_data.get("columns", []) if str(item or "").strip()] if isinstance(custom_data.get("columns"), list) else []
+    records = custom_data.get("records")
+    if columns and isinstance(records, list):
+        row_dicts: List[Dict[str, Any]] = []
+        for record in records:
+            if isinstance(record, dict):
+                row_dicts.append({column: record.get(column) for column in columns})
+            elif isinstance(record, list):
+                row_dicts.append({columns[index]: record[index] if index < len(record) else None for index in range(len(columns))})
+        if row_dicts:
+            return columns, row_dicts
+
+    points = custom_data.get("points")
+    if isinstance(points, list):
+        row_dicts = []
+        for point in points:
+            if isinstance(point, dict):
+                x_value = point.get("x", point.get("period", point.get("scenario", point.get("category"))))
+                y_value = point.get("y", point.get("value"))
+                row_dicts.append({"period": x_value, "value": y_value})
+        if row_dicts:
+            return ["period", "value"], row_dicts
+
+    series = custom_data.get("series")
+    if isinstance(series, list):
+        row_dicts = []
+        for item in series:
+            if not isinstance(item, dict):
+                continue
+            series_name = str(item.get("name") or item.get("label") or "").strip()
+            raw_points = item.get("points")
+            if not series_name or not isinstance(raw_points, list):
+                continue
+            for point in raw_points:
+                if isinstance(point, dict):
+                    x_value = point.get("x", point.get("period", point.get("year", point.get("category"))))
+                    y_value = point.get("y", point.get("value"))
+                elif isinstance(point, list):
+                    x_value = point[0] if len(point) > 0 else None
+                    y_value = point[1] if len(point) > 1 else None
+                else:
+                    continue
+                row_dicts.append({"period": x_value, "series": series_name, "value": y_value})
+        if row_dicts:
+            return ["period", "series", "value"], row_dicts
+
+    raise RuntimeError("Research-derived variables require custom_data.rows, custom_data.records with columns, custom_data.points, or custom_data.series.")
+
+
+def _research_evidence_from_custom_data(custom_data: Dict[str, Any]) -> Dict[str, Any]:
+    evidence = custom_data.get("evidence") if isinstance(custom_data.get("evidence"), list) else []
+    sources = custom_data.get("sources") if isinstance(custom_data.get("sources"), list) else []
+    return {
+        "kind": "research_derived",
+        "label": str(custom_data.get("label") or custom_data.get("name") or "Research-derived variable").strip(),
+        "search_queries": custom_data.get("search_queries") if isinstance(custom_data.get("search_queries"), list) else [],
+        "sources": sources,
+        "evidence": evidence,
+        "caveats": custom_data.get("caveats") if isinstance(custom_data.get("caveats"), list) else [],
+        "method": str(custom_data.get("method") or "").strip(),
+        "confidence": str(custom_data.get("confidence") or "low").strip(),
+    }
+
+
+def _research_retrieval_logic_from_custom_data(
+    *,
+    name: str,
+    retrieval_logic: Dict[str, Any],
+    custom_data: Dict[str, Any],
+) -> Dict[str, Any]:
+    supplied = dict(retrieval_logic) if isinstance(retrieval_logic, dict) else {}
+    return {
+        **supplied,
+        "kind": "research_derived",
+        "name": str(name or "").strip(),
+        "search_queries": custom_data.get("search_queries") if isinstance(custom_data.get("search_queries"), list) else supplied.get("search_queries", []),
+        "source_urls": custom_data.get("source_urls") if isinstance(custom_data.get("source_urls"), list) else supplied.get("source_urls", []),
+        "method": str(custom_data.get("method") or supplied.get("method") or "").strip(),
+        "confidence": str(custom_data.get("confidence") or supplied.get("confidence") or "low").strip(),
+        "caveats": custom_data.get("caveats") if isinstance(custom_data.get("caveats"), list) else supplied.get("caveats", []),
+    }
+
+
+def _compact_validated_data_from_custom_data(
+    *,
+    variable_name: str,
+    custom_data: Dict[str, Any],
+    transformation_logic: Dict[str, Any],
+) -> Dict[str, Any]:
+    headers, rows = _custom_data_rows_and_headers(custom_data)
+    if not headers or not rows:
+        raise RuntimeError("Research-derived variables require at least one row with reconstructable columns.")
+    artifact_payload = {
+        "kind": "research_derived",
+        "name": variable_name,
+        "method": custom_data.get("method"),
+        "confidence": custom_data.get("confidence") or "low",
+        "evidence": custom_data.get("evidence") if isinstance(custom_data.get("evidence"), list) else [],
+        "sources": custom_data.get("sources") if isinstance(custom_data.get("sources"), list) else [],
+        "search_queries": custom_data.get("search_queries") if isinstance(custom_data.get("search_queries"), list) else [],
+        "caveats": custom_data.get("caveats") if isinstance(custom_data.get("caveats"), list) else [],
+    }
+    artifact_id = "research_" + hashlib.sha256(json.dumps(_coerce_jsonable(artifact_payload), sort_keys=True).encode("utf-8")).hexdigest()[:16]
+    return compact_validated_data_from_rows(
+        artifact_kind="research_derived",
+        artifact_id=artifact_id,
+        variable_name=variable_name,
+        headers=headers,
+        rows=rows,
+        transformation_logic=transformation_logic,
+        source=artifact_payload,
+    )
+
+
+def _compact_official_derived_data_from_custom_data(
+    *,
+    variable_name: str,
+    custom_data: Dict[str, Any],
+    transformation_logic: Dict[str, Any],
+    source: Dict[str, Any],
+) -> Dict[str, Any]:
+    headers, rows = _custom_data_rows_and_headers(custom_data)
+    if not headers or not rows:
+        raise RuntimeError("Official-derived variables require approved final custom_data rows, records, points, or series.")
+    artifact_payload = {
+        "kind": "official_derived",
+        "name": variable_name,
+        "method": custom_data.get("method"),
+        "dimensions": custom_data.get("dimensions") if isinstance(custom_data.get("dimensions"), dict) else {},
+        "source": source,
+    }
+    artifact_id = "official_derived_" + hashlib.sha256(
+        json.dumps(_coerce_jsonable(artifact_payload), sort_keys=True).encode("utf-8")
+    ).hexdigest()[:16]
+    return compact_validated_data_from_rows(
+        artifact_kind="official_derived",
+        artifact_id=artifact_id,
+        variable_name=variable_name,
+        headers=headers,
+        rows=rows,
+        transformation_logic=transformation_logic,
+        source=artifact_payload,
+    )
+
+
+def _source_rows_from_narrowed_records(
+    *,
+    context: AgentRuntimeContext,
+    records: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    source_rows: List[Dict[str, Any]] = []
+    for index, record in enumerate(records, start=1):
+        payload = _artifact_payload_from_record(record)
+        if not isinstance(payload, dict):
+            continue
+        kind = str(record.get("kind") or payload.get("kind") or "").strip()
+        if kind.startswith("domestic"):
+            headers, rows = _flatten_domestic_payload(payload)
+        elif kind.startswith("macro"):
+            headers, rows = _flatten_macro_payload(payload)
+        else:
+            raise RuntimeError(f"Cannot save official-derived variable: unsupported narrowed artifact kind '{kind}'.")
+        source_id = f"source_{index}"
+        for row in _rows_as_dicts([str(header) for header in headers], rows):
+            enriched = dict(row)
+            enriched["_source_index"] = index
+            enriched["_source_step_id"] = source_id
+            enriched["_source_artifact_id"] = str(record.get("artifact_id") or "").strip()
+            source_rows.append(enriched)
+    if not source_rows:
+        raise RuntimeError("Cannot save official-derived variable: narrowed source artifacts had no rows.")
+    return source_rows
+
+
+def _assert_official_derived_transform_matches_approved_data(
+    *,
+    context: AgentRuntimeContext,
+    records: List[Dict[str, Any]],
+    variable_name: str,
+    transformation_logic: Dict[str, Any],
+    approved_data: Dict[str, Any],
+) -> None:
+    transformed_rows = apply_transformation_rows(
+        _source_rows_from_narrowed_records(context=context, records=records),
+        transformation_logic,
+    )
+    transformed_headers = list(transformed_rows[0].keys()) if transformed_rows else []
+    transformed_data = compact_validated_data_from_rows(
+        artifact_kind="official_derived",
+        artifact_id=str(approved_data.get("artifact_id") or "official_derived_current_artifacts"),
+        variable_name=variable_name,
+        headers=transformed_headers,
+        rows=transformed_rows,
+        transformation_logic=transformation_logic,
+        source=approved_data.get("source") if isinstance(approved_data.get("source"), dict) else {},
+    )
+    expected = {
+        "columns": approved_data.get("columns"),
+        "records": approved_data.get("records"),
+        "dimensions": approved_data.get("dimensions"),
+        "period_key": approved_data.get("period_key"),
+        "value_key": approved_data.get("value_key"),
+        "row_count": approved_data.get("row_count"),
+    }
+    actual = {
+        "columns": transformed_data.get("columns"),
+        "records": transformed_data.get("records"),
+        "dimensions": transformed_data.get("dimensions"),
+        "period_key": transformed_data.get("period_key"),
+        "value_key": transformed_data.get("value_key"),
+        "row_count": transformed_data.get("row_count"),
+    }
+    if actual != expected:
+        raise RuntimeError(
+            "Cannot save official-derived variable: transformation_logic.code does not reproduce the approved chart data "
+            "from the already narrowed source artifacts. Reuse the current artifacts and fix the transform code; do not reretrieve."
+        )
+
+
+def _research_validated_url(*, name: str, custom_data: Dict[str, Any], current_url: str = "") -> str:
+    if str(current_url or "").strip():
+        return str(current_url).strip()
+    source_urls = custom_data.get("source_urls") if isinstance(custom_data.get("source_urls"), list) else []
+    for url in source_urls:
+        text = str(url or "").strip()
+        if text.startswith(("http://", "https://")):
+            return text
+    for key in ("sources", "evidence"):
+        items = custom_data.get(key) if isinstance(custom_data.get(key), list) else []
+        for item in items:
+            if isinstance(item, dict):
+                text = str(item.get("url") or "").strip()
+                if text.startswith(("http://", "https://")):
+                    return text
+    slug = re.sub(r"[^a-z0-9]+", "-", str(name or "research-variable").lower()).strip("-")[:80] or "research-variable"
+    return f"research://{slug}"
+
+
+def _research_refresh_metadata(
+    *,
+    name: str,
+    validated_api_url: str,
+    retrieval_logic: Dict[str, Any],
+    transformation_logic: Dict[str, Any],
+    transform_summary: str,
+    recreation_summary: str,
+    custom_data: Dict[str, Any],
+) -> Dict[str, Any]:
+    return {
+        "version": 1,
+        "kind": "research_derived_refresh_metadata",
+        "name": str(name or "").strip(),
+        "validated_api_url": str(validated_api_url or "").strip(),
+        "retrieval_logic": retrieval_logic,
+        "transformation_logic": transformation_logic,
+        "transform_summary": str(transform_summary or "").strip(),
+        "recreation_summary": str(recreation_summary or "").strip(),
+        "research": _research_evidence_from_custom_data(custom_data),
+    }
+
+
+def _research_refresh_code_from_metadata(refresh_metadata: Dict[str, Any], validated_data: Dict[str, Any]) -> str:
+    metadata_payload = json.dumps(_coerce_jsonable(refresh_metadata), ensure_ascii=False, indent=2, sort_keys=True)
+    data_payload = json.dumps(_coerce_jsonable(validated_data), ensure_ascii=False, indent=2, sort_keys=True)
+    return f'''"""Refresh code for a Nisaba research-derived validated variable.
+
+This variable was produced from web research and analyst judgement.
+The approved compact data is embedded below; RESEARCH_METADATA stores the search queries, source URLs,
+extracted figures, caveats/judgement, confidence, and method for the next AI refresh/revision pass.
+"""
+
+import json
+
+RESEARCH_METADATA = json.loads({metadata_payload!r})
+APPROVED_VALIDATED_DATA = json.loads({data_payload!r})
+
+
+def refresh(existing_variable=None):
+    return APPROVED_VALIDATED_DATA
+
+
+if __name__ == "__main__":
+    print(json.dumps(refresh(), ensure_ascii=False))
+'''
+
+
+def _compact_validated_data_from_artifact_record(
+    *,
+    context: AgentRuntimeContext,
+    record: Dict[str, Any],
+    variable_name: str,
+    transformation_logic: Dict[str, Any],
+) -> Dict[str, Any]:
+    payload = _artifact_payload_from_record(record)
+    if not isinstance(payload, dict):
+        raise RuntimeError("Cannot save validated variable: the approved narrowed artifact payload is unavailable.")
+    kind = str(record.get("kind") or "").strip()
+    if not kind:
+        kind = str(payload.get("kind") or "").strip()
+    if kind.startswith("domestic"):
+        headers, rows = _flatten_domestic_payload(payload)
+    elif kind.startswith("macro"):
+        headers, rows = _flatten_macro_payload(payload)
+    else:
+        raise RuntimeError(f"Cannot save validated variable: unsupported narrowed artifact kind '{kind}'.")
+    if not headers or not rows:
+        raise RuntimeError("Cannot save validated variable: the approved narrowed artifact has no tabular data.")
+    clean_headers = [str(header) for header in headers]
+    row_dicts = _rows_as_dicts(clean_headers, rows)
+    transformed_rows = apply_transformation_rows(row_dicts, transformation_logic)
+    transformed_headers = list(transformed_rows[0].keys()) if transformed_rows else clean_headers
+    return compact_validated_data_from_rows(
+        artifact_kind=kind,
+        artifact_id=str(record.get("artifact_id") or "").strip(),
+        variable_name=str(variable_name or "").strip(),
+        headers=transformed_headers,
+        rows=transformed_rows,
+        transformation_logic=transformation_logic,
+        source={
+            "api_request_url": str(record.get("api_request_url") or "").strip(),
+            "api_request_urls": record.get("api_request_urls") if isinstance(record.get("api_request_urls"), list) else [],
+        },
+    )
+
+
+def _normalize_refresh_steps(retrieval_logic: Dict[str, Any]) -> List[Dict[str, Any]]:
+    steps = retrieval_logic.get("steps") if isinstance(retrieval_logic.get("steps"), list) else []
+    normalized: List[Dict[str, Any]] = []
+    for index, step in enumerate(steps, start=1):
+        if not isinstance(step, dict):
+            continue
+        normalized.append(
+            {
+                "id": str(step.get("id") or f"step_{index}").strip(),
+                "tool": str(step.get("tool") or "").strip(),
+                "args": step.get("args") if isinstance(step.get("args"), dict) else {},
+                "source_id": str(step.get("source_id") or "").strip(),
+            }
+        )
+    return normalized
+
+
+def _refresh_metadata_from_retrieval_logic(
+    *,
+    name: str = "",
+    validated_api_url: str,
+    retrieval_logic: Dict[str, Any],
+    transformation_logic: Dict[str, Any],
+    transform_summary: str,
+    recreation_summary: str,
+) -> Dict[str, Any]:
+    return {
+        "version": 1,
+        "kind": "validated_variable_refresh_metadata",
+        "name": str(name or "").strip(),
+        "validated_api_url": str(validated_api_url or "").strip(),
+        "api_request_urls": retrieval_logic.get("api_request_urls") if isinstance(retrieval_logic.get("api_request_urls"), list) else [],
+        "steps": _normalize_refresh_steps(retrieval_logic),
+        "transformation_logic": transformation_logic,
+        "transform_summary": str(transform_summary or "").strip(),
+        "recreation_summary": str(recreation_summary or "").strip(),
+    }
+
+
+def _refresh_code_from_metadata(refresh_metadata: Dict[str, Any]) -> str:
+    payload = json.dumps(_coerce_jsonable(refresh_metadata), ensure_ascii=False, indent=2, sort_keys=True)
+    return f'''"""Refresh code for a Nisaba validated variable.
+
+Run from the project backend environment. It recreates the approved narrowed data slice.
+"""
+
+import json
+from backend.app import unified_mcp_server as mcp_tools
+from backend.app.validated_variables import apply_transformation_rows, compact_validated_data_from_rows
+
+REFRESH_METADATA = json.loads({payload!r})
+
+
+def _interpolate(value, outputs):
+    if isinstance(value, str) and value.startswith("${{") and value.endswith("}}"):
+        token = value[2:-1].strip()
+        if token == "latest_artifact_id":
+            return outputs.get("_latest_artifact_id", "")
+        return outputs.get(token, "")
+    if isinstance(value, dict):
+        return {{key: _interpolate(item, outputs) for key, item in value.items()}}
+    if isinstance(value, list):
+        return [_interpolate(item, outputs) for item in value]
+    return value
+
+
+def _artifact_id(payload):
+    if isinstance(payload, dict):
+        for key in ("artifact_id", "artifactId", "id"):
+            if payload.get(key):
+                return str(payload[key])
+    return ""
+
+
+def refresh(existing_variable=None):
+    outputs = {{}}
+    latest_artifact_id = ""
+    source_rows = []
+    source_kinds = []
+    source_artifact_ids = []
+    for step in REFRESH_METADATA["steps"]:
+        tool = step["tool"]
+        args = _interpolate(step["args"], outputs)
+        if tool == "retrieve":
+            result = mcp_tools.retrieve(**args)
+        elif tool == "narrow_artifact":
+            result = mcp_tools.narrow_artifact(**args)
+        else:
+            raise RuntimeError(f"Unsupported validated-variable refresh tool: {{tool}}")
+        latest_artifact_id = _artifact_id(result) or latest_artifact_id
+        if latest_artifact_id:
+            outputs["_latest_artifact_id"] = latest_artifact_id
+        outputs[step["id"]] = result
+        if tool == "narrow_artifact":
+            payload = mcp_tools._load_artifact_payload(latest_artifact_id)
+            kind = mcp_tools._artifact_kind(latest_artifact_id, payload)
+            if kind.startswith("domestic"):
+                headers, rows = mcp_tools._flatten_domestic_payload(payload)
+            elif kind.startswith("macro"):
+                headers, rows = mcp_tools._flatten_macro_payload(payload)
+            else:
+                raise RuntimeError(f"Unsupported validated-variable artifact kind: {{kind}}")
+            source_id = step.get("source_id") or step["id"]
+            for row in rows:
+                row_dict = {{headers[index]: row[index] for index in range(min(len(headers), len(row)))}}
+                row_dict["_source_step_id"] = source_id
+                row_dict["_source_artifact_id"] = latest_artifact_id
+                source_rows.append(row_dict)
+            source_kinds.append(kind)
+            source_artifact_ids.append(latest_artifact_id)
+    if not source_rows:
+        raise RuntimeError("Validated-variable refresh did not produce narrowed source rows.")
+    transformation_logic = REFRESH_METADATA.get("transformation_logic", {{}})
+    transformed_rows = apply_transformation_rows(source_rows, transformation_logic)
+    transformed_headers = list(transformed_rows[0].keys()) if transformed_rows else list(source_rows[0].keys())
+    return compact_validated_data_from_rows(
+        artifact_kind=source_kinds[-1] if len(set(source_kinds)) == 1 else "official_derived",
+        artifact_id=source_artifact_ids[-1] if len(source_artifact_ids) == 1 else "official_derived",
+        variable_name=REFRESH_METADATA.get("name", ""),
+        headers=transformed_headers,
+        rows=transformed_rows,
+        transformation_logic=transformation_logic,
+        source={{
+            "validated_api_url": REFRESH_METADATA.get("validated_api_url", ""),
+            "api_request_urls": REFRESH_METADATA.get("api_request_urls", []),
+        }},
+    )
+
+
+if __name__ == "__main__":
+    print(json.dumps(refresh(), ensure_ascii=False))
+'''
+
+
+def _clear_heavy_validation_context(context: AgentRuntimeContext) -> None:
+    state = context.store.load(context.conversation_id)
+    state.artifacts = []
+    state.loop_history = []
+    state.current_abs_dataset_shortlist = []
+    state.current_macro_indicator_shortlist = []
+    state.active_run_artifact_count = 0
+    context.store.save(state)
+    artifacts_dir = _conversation_runtime_dir(context.conversation_id) / "artifacts"
+    if artifacts_dir.exists():
+        shutil.rmtree(artifacts_dir, ignore_errors=True)
+        artifacts_dir.mkdir(parents=True, exist_ok=True)
 
 
 def _retrieval_logic_has_narrow_step(value: Any) -> bool:
@@ -2465,7 +3700,12 @@ async def _generate_response_async(
         async with integrated_server:
             result = await Runner.run(
                 agent,
-                input=_build_agent_input(user_input, project_compact_memory, model_builder_state),
+                input=_build_agent_input(
+                    user_input,
+                    project_compact_memory,
+                    model_builder_state,
+                    state.pending_validated_variable_candidate,
+                ),
                 context=runtime_context,
                 session=session,
                 max_turns=30,
@@ -2668,8 +3908,16 @@ async def _generate_response_async(
     )
 
     state = store.load(conversation_id)
+    current_run_start = state.active_run_message_count if isinstance(state.active_run_message_count, int) else 0
+    existing_current_progress = [
+        str(message.get("content") or "").strip()
+        for message in list(state.messages or [])[current_run_start:]
+        if isinstance(message, dict) and str(message.get("role") or "").strip() == "progress"
+    ]
     for progress_message in saved_progress_messages:
-        state.messages.append({"role": "progress", "content": progress_message})
+        if progress_message not in existing_current_progress:
+            state.messages.append({"role": "progress", "content": progress_message})
+            existing_current_progress.append(progress_message)
     state.messages.append({"role": "assistant", "content": final_answer, "run_cost": run_cost})
     persisted_chat = persist_project_chat_run(
         user_id=resolved_user_id,

@@ -30,6 +30,7 @@ from .agents_service import (
     sync_agent_session_from_state,
 )
 from .model_builder import fetch_model_builder_state
+from .model_charts import build_model_node_chart
 from .storage import ConversationStore
 
 
@@ -53,6 +54,13 @@ class PendingMessageRequest(BaseModel):
     conversation_id: str = Field(..., description="Conversation to update.")
     message: str = Field(..., description="Queued or steer message text.")
     mode: str = Field(..., description="Pending message mode: queued or steer.")
+
+
+class ModelNodeChartRequest(BaseModel):
+    user_id: str = Field(..., description="Supabase user id.")
+    project_id: str = Field(..., description="Supabase modelling project id.")
+    node_id: str = Field(..., description="Model graph node id to preview.")
+    refresh: bool = Field(False, description="Force recalculation instead of using fresh project cache.")
 
 
 class ConversationSnapshot(BaseModel):
@@ -106,7 +114,10 @@ _DEFAULT_CORS_ORIGINS = [
 
 def _should_skip_request_logging(request: Request) -> bool:
     path = request.url.path
-    if request.method.upper() == "GET" and path.startswith("/api/conversation/"):
+    if request.method.upper() == "GET" and (
+        path.startswith("/api/conversation/")
+        or path.startswith("/api/chat/task-status/")
+    ):
         return True
     return False
 
@@ -315,6 +326,11 @@ async def _run_generation_job(
         normalized = str(message or "").strip()
         state.latest_progress = normalized
         state.latest_error = ""
+        if normalized:
+            messages = list(state.messages or [])
+            if not messages or str(messages[-1].get("role") or "") != "progress" or str(messages[-1].get("content") or "") != normalized:
+                messages.append({"role": "progress", "content": normalized})
+                state.messages = messages
         store.save(state)
         if normalized:
             _emit_runtime_log(f'Progress cid={conversation_id} message="{_truncate(normalized, 220)}"')
@@ -517,6 +533,22 @@ async def get_latest_export(conversation_id: str):
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         filename=download_filename,
     )
+
+
+@app.post("/api/model-node-chart")
+async def model_node_chart(request: ModelNodeChartRequest):
+    user_id = request.user_id.strip()
+    project_id = request.project_id.strip()
+    node_id = request.node_id.strip()
+    if not user_id or not project_id or not node_id:
+        raise HTTPException(status_code=400, detail="user_id, project_id, and node_id are required.")
+    try:
+        return build_model_node_chart(user_id=user_id, project_id=project_id, node_id=node_id, refresh=request.refresh)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Failed to build model node chart project_id=%s node_id=%s", project_id, node_id)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @app.post("/api/pending-message")
