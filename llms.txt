@@ -1,42 +1,18 @@
-# Aus Data Agent MCP
+# AusData MCP
 
-Aus Data Agent MCP is a unified MCP server for Australian public data with global macro context. It is designed for AI agents that need to discover, retrieve, inspect, narrow, and analyze real datasets rather than answer from web snippets.
+Public-data retrieval and analysis support for any MCP-capable agent.
+Australian official sources: ABS, RBA and DCCEEW. Pacific islands: Pacific Data Hub/SPC. Global context: World Bank, OECD, IMF and UN Comtrade.
 
-Produced by Dottie AI Studio: https://dottieaistudio.com.au/
+Canonical entrypoints:
+- README.md: installation, Codex/Claude Code setup, tools and limitations
+- AGENT_SYSTEM_PROMPT.md: analyst guidance supplied during MCP initialization
+- AGENTS.md: development rules and architecture
+- .mcp.json: project stdio configuration
+- ausdata_mcp/server.py: tool contracts
 
-Primary entrypoints:
-- README.md: project overview, data coverage, MCP quick start
-- skills.md: analyst instructions for using the MCP
-- AGENTS.md: development and architecture guidance
-- .mcp.json: project-scoped MCP server config
-- backend/app/unified_mcp_server.py: MCP tool surface
-- frontend/: app layer in development, not yet the public-ready agent surface
-- UNIFIED_CATALOG_FULL.json: checked-in unified catalog snapshot
-
-Core MCP tools:
-- search_catalog
-- get_metadata
-- retrieve
-- inspect_artifact
-- narrow_artifact
-
-Data coverage:
-- ABS: Australian official statistics including labour, CPI, population, national accounts, trade, housing, business, agriculture, census and more
-- RBA: cash rate, exchange rates, money, credit, bank balance sheets, payments, financial markets
-- DCCEEW: Australian Energy Statistics electricity generation by fuel type
-- OECD: international comparison datasets
-- World Bank: WDI and broader development indicators
-- IMF: macro-financial indicators
-- UN Comtrade: goods trade by partner and HS commodity code
-
-Agent flow:
-question -> write retrieval-oriented FTS queries -> shortlist candidate datasets -> pick relevant data -> inspect metadata when needed -> retrieve -> inspect/narrow artifact -> calculate and answer from data.
-
-Important caveats:
-- Search results are candidate pools, not final answers.
-- Do not invent dataset IDs, filters, codes, or source keys.
-- Prefer ABS for Australian domestic questions when it can answer the question.
-- Use global macro sources for comparison, context, or where Australian domestic data cannot answer directly.
-
-Useful keywords:
-Australian public data, MCP, AI agent, ABS, Australian Bureau of Statistics, RBA, Reserve Bank of Australia, DCCEEW, OECD, World Bank, WDI, IMF, UN Comtrade, economic data, labour force, CPI, inflation, GDP, population, migration, trade, housing, energy, electricity generation, financial markets.
+Workflow: search_catalog -> select candidate -> get_metadata -> retrieve -> agent reads the complete JSON at artifact_path, filters and analyses it with its own code.
+Prefer in-conversation charts and answers. The retrieval JSON is working evidence; do not create extra PNG, CSV, Excel or report files by default unless the user requests an export or the harness needs a temporary display file.
+If no suitable dataset is retrievable through this MCP, report that limit and ask before seeking data from websites, downloadable workbooks/CSVs or other APIs. Do not imply the publisher lacks the data.
+The retrieve manifest is a bounded summary, not the full evidence. The agent must have access to the MCP server's artifact_path; there are no post-retrieval MCP tools.
+For Pacific data, search with provider PDH; get_metadata with dimension browses codelists, and retrieve.sourceFilters selects source codes. Preserve unit multipliers, observation status and publication annotations from the saved JSON. Every source feeds one normalized live catalogue and FTS index, cached per session for 24 hours. Search reports stale/unavailable sources; dataset metadata remains a separate step.
+The calling agent chooses calculations, charts, files and response format. No web app or model API key is needed.

@@ -47,10 +47,6 @@ def clean_text(value: str) -> str:
     return text.strip(" ,")
 
 
-def row_has_values(row: list[str]) -> bool:
-    return any(str(value or "").strip() for value in row)
-
-
 def is_date_like(value: str) -> bool:
     return bool(DATE_VALUE_RE.match(str(value or "").strip()))
 

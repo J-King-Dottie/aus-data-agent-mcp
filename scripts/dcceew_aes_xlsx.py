@@ -113,13 +113,18 @@ def load_workbook(xlsx_path: Path):
 
 def find_header_row(rows: list[dict]) -> int:
     for idx, row in enumerate(rows):
+        if str(row.get("A", "")).strip().lower() in {"fuel type", "industry"}:
+            values = [str(value).strip() for col, value in row.items() if col != "A" and str(value).strip()]
+            if values and all(value in STATE_CODES or re.fullmatch(r"(?:19|20)\d{2}(?:-\d{2})?", value) for value in values):
+                return idx
+    for idx, row in enumerate(rows):
         b_value = str(row.get("B", "")).strip()
         data_cells = [
             str(value).strip()
             for col, value in row.items()
             if column_number(col) >= column_number("C") and str(value).strip()
         ]
-        if not b_value and len(data_cells) >= 2:
+        if not b_value and len(data_cells) >= 2 and all(value in STATE_CODES or re.fullmatch(r"(?:19|20)\d{2}(?:-\d{2})?", value) for value in data_cells):
             return idx
     raise ValueError("Unable to identify header row")
 
@@ -150,6 +155,8 @@ def infer_period_basis(sheet_name: str):
 
 
 def sheet_title(rows: list[dict]) -> str:
+    if rows and str(rows[0].get("A", "")).startswith("Table O"):
+        return str(rows[0]["A"])
     for index in (1, 0):
         if index < len(rows):
             value = str(rows[index].get("B", "")).strip()
@@ -162,8 +169,14 @@ def extract_sheet_records(sheet_name: str, rows: list[dict], sheet_group_id: str
     header_idx = find_header_row(rows)
     header_row = rows[header_idx]
     unit_row = rows[header_idx + 1] if header_idx + 1 < len(rows) else {}
+    modern = str(header_row.get("A", "")).strip().lower() in {"fuel type", "industry"}
+    label_column = "A" if modern else "B"
+    first_column = "B" if modern else "C"
+    header_unit = "GWh" if modern and any("Gigawatt hours" in str(row.get("A", "")) for row in rows[:header_idx]) else None
+    if modern and header_unit is None:
+        raise ValueError(f"Unrecognized units in AES sheet {sheet_name}; refusing to infer units.")
     columns = sorted(
-        (col for col in header_row.keys() if column_number(col) >= column_number("C")),
+        (col for col in header_row.keys() if column_number(col) >= column_number(first_column) and str(header_row[col]).strip()),
         key=column_number,
     )
     header_values = [str(header_row.get(col, "")).strip() for col in columns]
@@ -171,24 +184,24 @@ def extract_sheet_records(sheet_name: str, rows: list[dict], sheet_group_id: str
     section = None
     records = []
 
-    for row in rows[header_idx + 2 :]:
-        label = str(row.get("B", "")).strip()
+    for row in rows[header_idx + (1 if modern else 2) :]:
+        label = str(row.get(label_column, "")).strip()
         row_values = [str(row.get(col, "")).strip() for col in columns]
 
-        if label.startswith("Notes:"):
+        if label.startswith(("Notes:", "[a]", "[b]", "Source:")):
             break
         if not label and not any(row_values):
             continue
-        if label and not any(row_values):
+        if label and not any(row_values) and not modern:
             section = label
             continue
         if not label:
             continue
+        if parse_float(label) is not None:
+            raise ValueError(f"Numeric category in AES sheet {sheet_name}; workbook layout may have changed.")
 
         for col, column_value in zip(columns, header_values):
             value = parse_float(row.get(col, ""))
-            if value is None:
-                continue
             record = {
                 "sheet_group": sheet_group_id,
                 "sheet": sheet_name,
@@ -197,8 +210,9 @@ def extract_sheet_records(sheet_name: str, rows: list[dict], sheet_group_id: str
                 "category": label,
                 "column_dimension": column_dimension,
                 "column_value": column_value,
-                "unit": str(unit_row.get(col, "")).strip() or None,
+                "unit": ("percent" if "per cent" in label.lower() else header_unit) if modern else (str(unit_row.get(col, "")).strip() or None),
                 "value": value,
+                "raw_value": str(row.get(col, "")),
             }
             region = infer_sheet_region(sheet_name)
             if region and column_dimension != "REGION":
@@ -206,6 +220,10 @@ def extract_sheet_records(sheet_name: str, rows: list[dict], sheet_group_id: str
             period_basis = infer_period_basis(sheet_name)
             if period_basis:
                 record["period_basis"] = period_basis
+            if column_dimension == "REGION":
+                periods = re.findall(r"(?:19|20)\d{2}(?:-\d{2})?", sheet_title(rows))
+                if periods:
+                    record["time_period"] = periods[-1]
             records.append(record)
     return records
 
@@ -262,7 +280,7 @@ def build_metadata(args: argparse.Namespace, curation: dict, workbook_sheets: di
             "description": (
                 f"{args.description} Retrieve using dataKey equal to one of the curated "
                 "sheet group ids such as national_financial_year, state_financial_year, "
-                "bioenergy_breakdown_financial_year, or national_calendar_year."
+                "bioenergy, or national_calendar_year. Use the returned codelists for valid groups."
             ),
         },
         "dimensions": [
@@ -374,19 +392,23 @@ def build_resolved_dataset(args: argparse.Namespace, curation: dict, workbook_sh
 
         obs_dims = {
             record["column_dimension"]: {
-                "code": normalize_code(record["column_value"]),
+                "code": record["column_value"] if record["column_dimension"] == "TIME_PERIOD" else normalize_code(record["column_value"]),
                 "label": record["column_value"],
             }
         }
         dimensions_lookup[record["column_dimension"]][record["column_value"]] = record["column_value"]
+        if record.get("time_period"):
+            obs_dims["TIME_PERIOD"] = {"code": record["time_period"], "label": record["time_period"]}
+            dimensions_lookup["TIME_PERIOD"][record["time_period"]] = record["time_period"]
 
         observation = {
             "observationKey": record["column_value"],
             "value": record["value"],
             "dimensions": obs_dims,
+            "attributes": {"OBS_VALUE_RAW": record["raw_value"]},
         }
         if record.get("unit"):
-            observation["attributes"] = {"UNIT": record["unit"]}
+            observation["attributes"]["UNIT"] = record["unit"]
             dimensions_lookup["UNIT"][record["unit"]] = record["unit"]
         series["observations"].append(observation)
 
@@ -402,16 +424,57 @@ def build_resolved_dataset(args: argparse.Namespace, curation: dict, workbook_sh
             "dataKey": args.data_key or "all",
             "detail": args.detail,
         },
+        "source_annotations": {"workbook_notes": list(dict.fromkeys(
+            str(row.get("A") or row.get("B") or "").strip()
+            for name in target_sheets for row in workbook_sheets.get(name, [])
+            if str(row.get("A") or row.get("B") or "").strip().startswith(("Blank cells", "[", "Notes:", "Source:"))
+        ))},
         "dimensions": dict(dimensions_lookup),
         "observationCount": sum(len(item["observations"]) for item in series_map.values()),
         "series": list(series_map.values()),
     }
 
 
+def discover_curation(workbook_sheets: dict) -> dict:
+    """Resolve supported Table O sheet groups from the actual workbook, not its year."""
+    groups = {
+        "national_financial_year": [], "state_financial_year": [],
+        "national_calendar_year": [], "state_calendar_year": [],
+        "state_summary": [], "bioenergy": [], "industry": [],
+    }
+    ignored = []
+    for name in workbook_sheets:
+        compact = re.sub(r"\s+", "", name).upper()
+        if compact == "AUSFY":
+            group = "national_financial_year"
+        elif compact == "AUSCY":
+            group = "national_calendar_year"
+        elif compact.endswith("FY") and compact[:-2] in STATE_CODES:
+            group = "state_financial_year"
+        elif compact.endswith("CY") and compact[:-2] in STATE_CODES:
+            group = "state_calendar_year"
+        elif compact.startswith("STATESUMMARY"):
+            group = "state_summary"
+        elif "BIOENERGY" in compact:
+            group = "bioenergy"
+        elif "INDUSTRY" in compact:
+            group = "industry"
+        else:
+            ignored.append(name)
+            continue
+        groups[group].append(name)
+    if not groups["national_financial_year"]:
+        raise ValueError("AES Table O workbook schema changed: missing AUS FY sheet.")
+    return {"sheetGroups": [{"id": key, "description": key.replace("_", " "), "sheets": names}
+                            for key, names in groups.items() if names], "ignoredSheets": ignored}
+
+
 def main() -> None:
     args = parse_args()
     curation = json.loads(args.curation_json)
     workbook_sheets = load_workbook(Path(args.xlsx))
+    if curation.get("discoverSheets"):
+        curation = discover_curation(workbook_sheets)
 
     if args.command == "metadata":
         print(json.dumps(build_metadata(args, curation, workbook_sheets)))

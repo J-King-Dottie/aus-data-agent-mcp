@@ -1,12 +1,11 @@
 {
   "mcpServers": {
     "ausdata": {
+      "type": "stdio",
       "command": "python",
       "args": [
-        "-m",
-        "backend.app.unified_mcp_server"
-      ],
-      "cwd": "."
+        "scripts/run_mcp.py"
+      ]
     }
   }
 }

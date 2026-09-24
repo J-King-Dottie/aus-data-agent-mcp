@@ -1,83 +1,47 @@
 # Project Agent Guide
 
-This project is a polished, agent-facing MCP product for Australian public data with global macro context. The web app is a separate interface layer in development.
+This project is an MCP for public-data retrieval and analysis support. The calling agent owns reasoning, calculations and output formats. The web app and its orchestration have been removed.
 
 ## Architecture
 
-- `backend/app/unified_mcp_server.py` is the MCP entrypoint. Keep it focused on catalogue search, metadata inspection, retrieval, artifact inspection, and artifact narrowing.
-- `backend/app/unified_catalog.py` loads the unified catalogue and SQLite FTS index used for shortlist discovery.
-- `backend/app/domestic_data.py` contains ABS and Australian domestic retrieval.
-- `backend/app/macro_data.py` contains OECD, World Bank, IMF, RBA, UN Comtrade, and related macro retrieval.
-- `AGENT_SYSTEM_PROMPT.md` is the single source of truth for agent behavior, query expansion, dataset selection, evidence judgment, calculations, charting, caveats, and response standards.
-- MCP tool descriptions are the single source of truth for how to call each MCP tool.
-- `.mcp.json` is the project-scoped MCP configuration for agents that clone the repo.
-- `frontend/` and the web backend are the app layer. They should sit over the MCP/retrieval stack, not redefine the core analyst workflow.
+- `ausdata_mcp/server.py`: MCP tools, artifacts, protocol instructions, resource and prompt.
+- `ausdata_mcp/unified_catalog.py`: normalized session catalogue, atomic generation checks and one SQLite FTS index.
+- `ausdata_mcp/catalog_sources.py`: live source-specific discovery adapters; no dataset observations.
+- `ausdata_mcp/catalog_refresh.py`: parallel refresh, expiry, retry and source coverage status.
+- `ausdata_mcp/runtime.py`: common runtime/session identity for cache and artifacts.
+- `ausdata_mcp/domestic_data.py`: ABS and direct Australian sources.
+- `ausdata_mcp/macro_data.py`: OECD, World Bank, IMF and UN Comtrade retrieval.
+- `ausdata_mcp/pacific_data.py`: Pacific Data Hub/SPC live catalogue, SDMX structure/codelists and validated retrieval, adapted from the Pacific Data Hub Agent MCP.
+- `ausdata_mcp/data_config.py`: source configuration without model or database dependencies.
+- `AGENT_SYSTEM_PROMPT.md`: single source of truth for analyst behavior, evidence standards, calculations, caveats and presentation guidance. Supplied to clients at MCP initialization and through `ausdata://guide`.
+- Tool descriptions: single source of truth for call mechanics.
+- `.mcp.json`: project-scoped stdio wiring for Claude Code and compatible clients. Codex registration is documented in README.
+- `scripts/run_mcp.py`: absolute-path launcher independent of the client's working directory.
+- `benchmarks/`: fixed agent test questions and reviewed results; no benchmark logic belongs in MCP tools.
 
-## Product Shape
+## Development rules
 
-Keep the same broad shape as the Pacific Data Hub Agent MCP:
+- Keep analyst judgment in `AGENT_SYSTEM_PROMPT.md`, not source adapters or tool routing. Update it in the same change when analysis behavior changes.
+- Preserve search -> shortlist selection -> inspect metadata -> retrieve -> agent reads and analyses the saved data. Reuse known metadata and retrieval files where appropriate. Keep only the three core MCP tools: `search_catalog`, `get_metadata`, `retrieve`.
+- Never require a particular model vendor, app, account, database, output format or approval ceremony for ordinary data analysis.
+- Keep data acquisition inside the MCP's supported pathways unless the user explicitly authorizes another route. If no suitable dataset is retrievable here, the agent should report that specific limitation and ask before seeking workbooks, websites or other APIs; do not imply the publisher has no data.
+- Do not add topic-specific report routes or duplicate analyst prompts. `CLAUDE.md` is only a pointer for that harness.
+- Prefer live official-source retrieval. Discovery fetches live source lists into a disposable normalized file and FTS cache, not a checked-in catalogue or raw data mirror.
+- All providers, including Pacific, share the same session-scoped catalogue and FTS text-match order. Return up to 50 candidates by default without scores or rank labels; the agent selects suitable data after inspecting definitions and coverage. Default sessions start fresh; cache successful source lists for 24 hours, disclose stale/unavailable sources and retry failures after 60 seconds. Keep dataset metadata/codelists separate from catalogue discovery.
+- RBA and DCCEEW routing must use live discovered download URLs. Validate file schemas; never accept an unknown layout as valid observations. Comtrade discovery is a supported-cube descriptor validated against live trade flows, not a complete indicator catalogue.
+- Preserve PDH dimension codes, UNIT_MULT, UNIT_MEASURE, OBS_STATUS, raw suppressed values and source annotations. Metadata pagination must disclose remaining codes. Dataset IDs are namespaced as `pdh::agency::dataflow::version`.
+- Keep Australian custom sources in the domestic catalogue/retrieval flow. Align geography, period, frequency, seasonal treatment, units and definitions before comparisons.
+- Tool output must disclose truncation/pagination. Retrieval returns a bounded manifest with an absolute path to complete JSON evidence; it must never inline the full dataset, silently drop requested series or return empty data as successful evidence.
+- Agent presentation guidance should prefer in-chat charts and answers and avoid optional PNG, CSV, Excel or report files by default. The MCP's saved retrieval JSON is working evidence, not an automatic deliverable; honor explicit user requests for export files.
+- Source adapters must reject invalid requested codes rather than silently dropping them. Keep errors specific enough for an agent to revisit metadata and repair the request; do not make source substitutions inside the MCP.
+- Preserve source references and retrieval timestamps in the saved data and manifest. Use unique session-scoped file paths; filtering and derived-output lineage belong to the calling agent.
+- Keep stdout exclusively for MCP protocol messages. Diagnostics and subprocess progress go to stderr.
+- Independent requests may run concurrently. Keep shared index creation atomic. Explicit session IDs must not be shared by concurrent server processes.
 
-```text
-README.md -> agent entrypoint and quick start
-AGENTS.md -> project architecture and development guardrails
-AGENT_SYSTEM_PROMPT.md -> agent system prompt and evidence standards
-.mcp.json -> MCP wiring for agents
-MCP server -> source-specific data capabilities
-```
+## Verification
 
-The common workflow is:
-
-```text
-user question -> AI-written FTS queries -> catalogue shortlist
--> AI picks relevant data -> inspect metadata/structure
--> retrieve real data -> inspect/narrow data -> analyze from evidence
-```
-
-## Development Rules
-
-- Do not put analyst judgment into the MCP server. The MCP exposes data capabilities; `AGENT_SYSTEM_PROMPT.md` tells the agent when and why to use them.
-- When changing analysis behavior, chart choice, evidence standards, caveats, or response style, update `AGENT_SYSTEM_PROMPT.md` in the same change.
-- Keep tool-call mechanics in MCP tool descriptions, not in the agent system prompt.
-- Do not create duplicate prompt/guide files unless there is a strong runtime need. If one is added, it must point back to `AGENT_SYSTEM_PROMPT.md` and avoid conflicting instructions.
-- Do not add topic-specific report routes. Labour, CPI, trade, housing, energy, population, financial-market, and macro-comparison questions should use the same general workflow.
-- Prefer live public-source retrieval where practical. Do not add raw data mirrors unless there is a clear operational reason.
-- Keep custom Australian sources inside the same domestic catalogue and retrieval flow where possible.
-- Treat catalogue search results as candidate pools. The AI analyst selects relevant datasets, then inspects metadata/structure before retrieval.
-- For Australian domestic questions, prefer ABS or another direct Australian official source when it can answer the question. Use macro sources for comparison, context, or when domestic data cannot answer directly.
-- Before comparing series, align geography, period, frequency, seasonal treatment, units, and definitions.
-- If a change affects MCP usage, check the direct MCP path. If it affects the app, also check the app path.
-
-## Local Demo Terminals
-
-- The repo is a WSL project at `/home/projects/abs-mcp`, exposed to Windows as `\\wsl.localhost\Ubuntu\home\projects\abs-mcp`.
-- To open the visible frontend and backend demo terminals, use `start-visible-dev.ps1 -SkipInstall` from Windows PowerShell:
-
-```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "\\wsl.localhost\Ubuntu\home\projects\abs-mcp\start-visible-dev.ps1" -SkipInstall
-```
-
-- Use `restart-visible-dev.ps1` only when stale AusData/abs-mcp dev terminal wrappers or stuck ports need cleanup. It closes stale wrappers, confirms WSL responds, then runs `start-visible-dev.ps1 -SkipInstall`.
-- The visible terminals are expected to auto-refresh on code changes: the frontend script runs Vite dev server with HMR, and the backend script runs Uvicorn with `--reload --reload-dir backend`.
-- Local frontend dev should call the backend through the Vite `/api` proxy, matching `dottie-ai-studio`. Do not keep `VITE_API_BASE_URL` set for the visible local frontend terminal, because that bypasses the proxy and causes browser CORS preflights to `:5000`.
-- Do not hand-open ad hoc frontend/backend terminal commands unless the visible-terminal launcher fails and you have inspected the failure.
-- If dependencies need to be reinstalled, omit `-SkipInstall` on `start-visible-dev.ps1` or run `restart-visible-dev.ps1 -Install`.
-- After launch, verify both endpoints before reporting success:
-
-```powershell
-Invoke-WebRequest -UseBasicParsing -Uri http://127.0.0.1:3000 -TimeoutSec 5
-Invoke-WebRequest -UseBasicParsing -Uri http://127.0.0.1:5000 -TimeoutSec 5
-```
-
-## App Agent Context
-
-- The chat UI should load Supabase project chat history by `user_id` and `project_id`; do not use `conversation_id` as a history boundary.
-- Before an Agents SDK run, hydrate the SDK session from recent Supabase project chat for that `user_id` and `project_id`, then let `_agent_session_items_from_chat_history` keep the latest 5 user/assistant pairs plus recent workflow notes.
-- Also inject `project_compact_memory` and visible model context into the high-level agent input. The model-builder state must include active validated variables, graph nodes, graph edges, node descriptions, and compact `node_data` summaries.
-- Compact project memory is continuity only, not source evidence. Refresh it after the first useful run and then every 5 completed user/assistant pairs.
-
-## Before Merging MCP Changes
-
-- Confirm `README.md`, `AGENTS.md`, `AGENT_SYSTEM_PROMPT.md`, and `.mcp.json` still describe the same architecture.
-- Confirm the MCP tool descriptions match the implemented behavior.
-- Confirm no source-specific change bypasses the shortlist, inspect, retrieve, narrow, analyze pattern without a clear reason.
-- Run compile checks for touched Python modules.
+- Run `python -m unittest discover -s tests -v` and `python -m compileall -q ausdata_mcp scripts`.
+- Check the real stdio MCP path from a different working directory, without model credentials or app packages.
+- Keep deterministic regressions offline; use opt-in live smoke checks to distinguish provider/network failures from code failures.
+- Confirm README, this file, AGENT_SYSTEM_PROMPT.md, llms.txt, tool descriptions and .mcp.json agree.
+- This checkout lives in WSL at `/home/projects/abs-mcp`, accessible on Windows through `\\wsl.localhost\Ubuntu\home\projects\abs-mcp`.

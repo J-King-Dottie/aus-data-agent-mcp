@@ -1,0 +1,77 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "id": "abs_youth_unemployment",
+      "reference_dataset_id": "ABS,LF_AGES,1.0.0",
+      "review_checks": [
+        "Uses ABS Labour Force monthly data rather than a Census snapshot.",
+        "Selects unemployment rate, ages 15–24, Australia, seasonally adjusted, and each sex without mixing other series.",
+        "Reports the August 2022 male and female percentages accurately and cites ABS."
+      ]
+    },
+    {
+      "id": "world_bank_gdp_per_capita",
+      "reference_dataset_id": "worldbank::NY.GDP.PCAP.CD",
+      "review_checks": [
+        "Uses the current-US-dollar GDP per capita indicator, not PPP or constant-price GDP.",
+        "Retrieves both countries for 2022 and calculates the difference in the stated direction.",
+        "Reports units and a direct World Bank source reference."
+      ]
+    },
+    {
+      "id": "imf_unemployment",
+      "reference_dataset_id": "imf::LUR",
+      "review_checks": [
+        "Uses the IMF unemployment-rate series for Australia and both requested years.",
+        "Reports the two percentages and computes a percentage-point change, not a percent change.",
+        "Cites the IMF source and does not imply a different unemployment definition."
+      ]
+    },
+    {
+      "id": "oecd_core_cpi",
+      "reference_dataset_id": "oecd::OECD.SDD.TPS::DSD_PRICES_COICOP2018@DF_PRICES_C2018_N_TXCP01_NRG::1.0",
+      "review_checks": [
+        "Selects the specified OECD core-CPI dataflow rather than headline CPI or HICP.",
+        "Uses Australia's 2023 retrieved observation without combining other dimensions.",
+        "Reports the source's unit and cites the OECD dataflow."
+      ]
+    },
+    {
+      "id": "rba_cash_rate",
+      "reference_dataset_id": "CUSTOM_AUS,RBA_F1,1.0",
+      "review_checks": [
+        "Inspects the live RBA F1 table and selects the Cash Rate Target series, not the interbank rate.",
+        "Finds both specified dates in the saved observations and computes the change correctly.",
+        "Reports rates as percentages and cites the RBA table."
+      ]
+    },
+    {
+      "id": "dcceew_black_coal",
+      "reference_dataset_id": "CUSTOM_AUS,AES_TABLE_O,1.0",
+      "review_checks": [
+        "Uses the national financial-year series and black-coal category, not total generation or another fuel.",
+        "Extracts the two requested financial years and computes the GWh change correctly.",
+        "Includes units and the DCCEEW workbook's source reference and notes."
+      ]
+    },
+    {
+      "id": "pdh_fiji_energy",
+      "reference_dataset_id": "pdh::SPC::DF_ENERGY::1.0",
+      "review_checks": [
+        "Inspects the PDH dimensions/codelist and uses Fiji's source geography code and ENERGY_IND_001.",
+        "Reports the two retrieved observations with their unit without silently rescaling or filling missing values.",
+        "Explains the indicator and preserves material status or source annotations."
+      ]
+    },
+    {
+      "id": "comtrade_australia_exports",
+      "reference_dataset_id": "comtrade::goods_trade",
+      "review_checks": [
+        "Uses Australia as reporter, World as partner, annual export flow and the total-products commodity code.",
+        "Reports the retrieved 2022 trade value in US dollars without confusing imports with exports.",
+        "States the Comtrade request scope and cites the source."
+      ]
+    }
+  ]
+}

@@ -1,0 +1,45 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "id": "abs_youth_unemployment",
+      "source": "ABS",
+      "question": "Using AusData, what were the seasonally adjusted unemployment rates for Australian males and females aged 15–24 in August 2022? Give both percentages to one decimal place and cite the source."
+    },
+    {
+      "id": "world_bank_gdp_per_capita",
+      "source": "World Bank",
+      "question": "Using AusData's World Bank source, compare GDP per capita in current US dollars for Australia and New Zealand in 2022. Give each value and the difference, and cite the indicator."
+    },
+    {
+      "id": "imf_unemployment",
+      "source": "IMF",
+      "question": "Using AusData's IMF DataMapper source, what were Australia's unemployment rates in 2022 and 2023, and how many percentage points did the rate change? Cite the IMF series."
+    },
+    {
+      "id": "oecd_core_cpi",
+      "source": "OECD",
+      "question": "Using AusData's OECD source, find Australia's 2023 national CPI growth over one year for all items less food and energy (COICOP 2018). What value and unit does the OECD dataflow report? Cite it."
+    },
+    {
+      "id": "rba_cash_rate",
+      "source": "RBA",
+      "question": "Using AusData's RBA source, what was the cash rate target on 1 March and 28 March 2024? Give both rates and the change in percentage points, with a source reference."
+    },
+    {
+      "id": "dcceew_black_coal",
+      "source": "DCCEEW",
+      "question": "Using AusData's Australian Energy Statistics Table O, compare national electricity generation from black coal in 1989–90 and 2024–25. Give both values in GWh and the change, with a source reference."
+    },
+    {
+      "id": "pdh_fiji_energy",
+      "source": "Pacific Data Hub",
+      "question": "Using AusData's Pacific Data Hub energy indicators, report Fiji's values for indicator ENERGY_IND_001 in 2010 and 2018. Give the unit and what the indicator measures, and mention any relevant status or source notes."
+    },
+    {
+      "id": "comtrade_australia_exports",
+      "source": "UN Comtrade",
+      "question": "Using AusData's UN Comtrade source, what was the value in US dollars of Australia's total goods exports to the world in 2022? Use annual exports, all products, and cite the reporter, partner and trade-flow scope."
+    }
+  ]
+}
