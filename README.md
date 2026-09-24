@@ -1,6 +1,6 @@
 # AusData MCP — public data for AI agents
 
-**AusData** is a local [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server for finding and retrieving Australian, Pacific, and global public data. It gives agents such as **Codex** and **Claude Code** one searchable catalogue across the **Australian Bureau of Statistics (ABS)**, **Reserve Bank of Australia (RBA)**, **Pacific Data Hub**, **World Bank**, **OECD**, **IMF**, **UN Comtrade**, and Australian energy statistics.
+**AusData** is a local [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server for finding and retrieving Australian, Pacific, and global public data. It gives agents such as **Codex** and **Claude Code** one searchable catalogue across the **Australian Bureau of Statistics (ABS)**, **Reserve Bank of Australia (RBA)**, **Department of Climate Change, Energy, the Environment and Water (DCCEEW)**, **Pacific Data Hub**, **World Bank**, **OECD**, **IMF**, and **UN Comtrade**.
 
 Ask a question in ordinary language. The agent searches live source catalogues, inspects the selected dataset, retrieves the data, then uses the saved evidence to calculate and explain the answer. AusData supplies data capabilities and analyst guidance; the agent chooses the analysis, chart, and response format. No web app, model API key, or database service is required.
 
@@ -55,7 +55,7 @@ Retrieved JSON stays under `runtime/sessions/<session-id>/artifacts/` until remo
 | --- | --- |
 | ABS | Official Australian statistics via ABS SDMX dataflows: labour, prices, population, national accounts, trade, and more |
 | RBA | Supported statistical-table CSV series, including rates, exchange rates, money, and credit |
-| DCCEEW | Latest Australian Energy Statistics Table O electricity generation workbook |
+| DCCEEW | Latest Australian Energy Statistics Table O electricity generation workbook from the Department of Climate Change, Energy, the Environment and Water |
 | Pacific Data Hub / SPC | Pacific island SDMX datasets, including population, energy, prices, trade, and SDGs |
 | World Bank | Indicator API, including WDI and other identified databases |
 | OECD | Data Explorer catalogue discovery and SDMX observation retrieval |
