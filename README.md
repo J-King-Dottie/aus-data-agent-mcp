@@ -75,4 +75,7 @@ python scripts/smoke_mcp.py --live  # optional live World Bank retrieval
 
 The smoke check uses a real stdio MCP client/server session. See [AGENTS.md](AGENTS.md) for architecture and development rules, [AGENT_SYSTEM_PROMPT.md](AGENT_SYSTEM_PROMPT.md) for evidence standards, and the [agent benchmark](benchmarks/README.md) for eight fixed questions across the sources. The benchmark is run by the agent assigned to the task; it does not launch another model.
 
-Produced by [Dottie AI Studio](https://dottieaistudio.com.au/). Incorporates ideas and data capabilities from [mcp-server-abs](https://github.com/seansoreilly/mcp-server-abs), [openecon-data](https://github.com/hanlulong/openecon-data), and [Pacific Data Hub Agent MCP](https://github.com/J-King-Dottie/pacific-data-hub-agent-mcp).
+Produced by [Dottie AI Studio](https://dottieaistudio.com.au/).
+Built on existing open source work including [seansoreilly/mcp-server-abs](https://github.com/seansoreilly/mcp-server-abs) and [hanlulong/openecon-data](https://github.com/hanlulong/openecon-data).
+
+Also incorporates data capabilities from [Pacific Data Hub Agent MCP](https://github.com/J-King-Dottie/pacific-data-hub-agent-mcp).
