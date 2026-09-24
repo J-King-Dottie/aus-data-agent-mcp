@@ -1,6 +1,6 @@
-# AusData MCP — Australian public data for AI agents
+# AusData MCP — public data for AI agents
 
-**AusData** is a local [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server for finding and retrieving Australian and Pacific statistics with global economic context. It gives agents such as **Codex** and **Claude Code** one searchable catalogue across the **Australian Bureau of Statistics (ABS)**, **Reserve Bank of Australia (RBA)**, **Pacific Data Hub**, **World Bank**, **OECD**, **IMF**, **UN Comtrade**, and Australian energy statistics.
+**AusData** is a local [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server for finding and retrieving Australian, Pacific, and global public data. It gives agents such as **Codex** and **Claude Code** one searchable catalogue across the **Australian Bureau of Statistics (ABS)**, **Reserve Bank of Australia (RBA)**, **Pacific Data Hub**, **World Bank**, **OECD**, **IMF**, **UN Comtrade**, and Australian energy statistics.
 
 Ask a question in ordinary language. The agent searches live source catalogues, inspects the selected dataset, retrieves the data, then uses the saved evidence to calculate and explain the answer. AusData supplies data capabilities and analyst guidance; the agent chooses the analysis, chart, and response format. No web app, model API key, or database service is required.
 
