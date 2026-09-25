@@ -1,6 +1,6 @@
-# AusData MCP
+# Australian Public Data MCP
 
-A Python [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server for live discovery and retrieval of Australian, Pacific, and global public data. Sources include ABS, RBA, DCCEEW's Australian Energy Statistics, Pacific Data Hub/SPC, World Bank, OECD, IMF, and UN Comtrade.
+A [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server for AI agents to search live catalogues and retrieve official Australian, Pacific, and global public data. Sources include the Australian Bureau of Statistics (ABS), Reserve Bank of Australia (RBA), DCCEEW's Australian Energy Statistics, Pacific Data Hub/SPC, World Bank, OECD, IMF, and UN Comtrade. No model API key is required.
 
 Produced by [Dottie AI Studio](https://dottieaistudio.com.au/).
 Built on existing open source work including [seansoreilly/mcp-server-abs](https://github.com/seansoreilly/mcp-server-abs) and [hanlulong/openecon-data](https://github.com/hanlulong/openecon-data).
@@ -10,6 +10,8 @@ Built on existing open source work including [seansoreilly/mcp-server-abs](https
 Install with Python 3.11+ and SQLite FTS5 support:
 
 ```bash
+git clone https://github.com/J-King-Dottie/australian-public-data-mcp.git
+cd australian-public-data-mcp
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -r requirements.txt
@@ -18,8 +20,8 @@ python -m pip install -r requirements.txt
 Run the server over stdio with `python scripts/run_mcp.py`. The project [`.mcp.json`](.mcp.json) works for clients launched here with the virtual environment active. From another project, use absolute paths; for example:
 
 ```bash
-codex mcp add ausdata -- /absolute/path/aus-data-agent-mcp/.venv/bin/python /absolute/path/aus-data-agent-mcp/scripts/run_mcp.py
-claude mcp add --transport stdio ausdata -- /absolute/path/aus-data-agent-mcp/.venv/bin/python /absolute/path/aus-data-agent-mcp/scripts/run_mcp.py
+codex mcp add ausdata -- /absolute/path/australian-public-data-mcp/.venv/bin/python /absolute/path/australian-public-data-mcp/scripts/run_mcp.py
+claude mcp add --transport stdio ausdata -- /absolute/path/australian-public-data-mcp/.venv/bin/python /absolute/path/australian-public-data-mcp/scripts/run_mcp.py
 ```
 
 The workflow has three tools:

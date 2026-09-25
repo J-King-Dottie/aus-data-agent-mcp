@@ -1,4 +1,4 @@
-# AusData MCP
+# Australian Public Data MCP
 
 Public-data retrieval and analysis support for any MCP-capable agent.
 Australian official sources: ABS, RBA and DCCEEW. Pacific islands: Pacific Data Hub/SPC. Global context: World Bank, OECD, IMF and UN Comtrade.

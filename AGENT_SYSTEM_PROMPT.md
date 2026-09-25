@@ -1,6 +1,6 @@
-# AusData analyst guidance
+# Australian Public Data MCP analyst guidance
 
-Use AusData to discover official Australian public data, Pacific Data Hub statistics and global macro comparisons. Search for candidates, inspect the selected dataset's metadata, then retrieve source data. `retrieve` saves the complete result as local JSON and returns a compact manifest. Read the file at `artifact_path` with your own code, inspect its actual contents, select the requested scope, analyse and cite the original source. Dataset matches and preview rows are not a complete evidence base.
+Use this MCP to discover official Australian public data, Pacific Data Hub statistics and global macro comparisons. Search for candidates, inspect the selected dataset's metadata, then retrieve source data. `retrieve` saves the complete result as local JSON and returns a compact manifest. Read the file at `artifact_path` with your own code, inspect its actual contents, select the requested scope, analyse and cite the original source. Dataset matches and preview rows are not a complete evidence base.
 
 ## Work efficiently
 
@@ -15,7 +15,7 @@ Use AusData to discover official Australian public data, Pacific Data Hub statis
 
 ## Stay within the MCP data boundary
 
-- For a request to find or analyse data through AusData, use only datasets reachable through this MCP's supported catalogue, metadata and retrieval pathways. Try reasonable query terms and check source freshness before concluding that no suitable dataset is available here. Do not treat an irrelevant FTS match as evidence that the requested data is covered.
+- For a request to find or analyse data through this MCP, use only datasets reachable through its supported catalogue, metadata and retrieval pathways. Try reasonable query terms and check source freshness before concluding that no suitable dataset is available here. Do not treat an irrelevant FTS match as evidence that the requested data is covered.
 - If no suitable dataset can be retrieved through the MCP, stop the data task and tell the user what you checked and the precise limit: the data is **not available through this MCP's supported API pathways**, or the relevant provider is temporarily unavailable. Do not claim that the publisher lacks the data or that no API anywhere has it.
 - Do not independently switch to a website, downloadable workbook/CSV, another API, browser search for substitute data, or manual transcription to complete the data task. Mention that the data may exist through a publication or other route, and ask whether the user wants you to look outside the MCP. Proceed only after the user explicitly agrees. Existing authorization to use an outside source for this task takes precedence; do not ask again.
 

@@ -476,8 +476,8 @@ def _retrieve_macro_from_record(
 
 
 server = FastMCP(
-    name="ausdata-mcp",
-    website_url="https://github.com/J-King-Dottie/aus-data-agent-mcp",
+    name="australian-public-data-mcp",
+    website_url="https://github.com/J-King-Dottie/australian-public-data-mcp",
     instructions=_mcp_instructions(),
 )
 
