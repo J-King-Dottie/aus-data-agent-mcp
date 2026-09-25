@@ -4,7 +4,7 @@ Public-data retrieval and analysis support for any MCP-capable agent.
 Australian official sources: ABS, RBA and DCCEEW. Pacific islands: Pacific Data Hub/SPC. Global context: World Bank, OECD, IMF and UN Comtrade.
 
 Canonical entrypoints:
-- README.md: installation, Codex/Claude Code setup, tools and limitations
+- README.md: installation, MCP client setup, tools and sources
 - AGENT_SYSTEM_PROMPT.md: analyst guidance supplied during MCP initialization
 - AGENTS.md: development rules and architecture
 - .mcp.json: project stdio configuration
@@ -18,4 +18,4 @@ The retrieve manifest is a bounded summary, not the full evidence. The agent mus
 For Pacific data, search with provider PDH; get_metadata with dimension browses codelists, and retrieve.sourceFilters selects source codes. Preserve unit multipliers, observation status and publication annotations from the saved JSON. Every source feeds one normalized live catalogue and FTS index, cached per session for 24 hours. Search reports stale/unavailable sources; dataset metadata remains a separate step.
 The calling agent chooses calculations, charts, files and response format. No web app or model API key is needed.
 
-Unsupported source parameters and missing requested series fail explicitly. RBA dates use ISO codes; DCCEEW requires a metadata-selected sheet group or sheet. Filter custom-source periods in the saved JSON. Macro source_row fields retain raw publisher observations. Comtrade fixes secondary-partner, customs and transport dimensions to totals; get_metadata discloses this scope. See README for configuration, offline checks and opt-in live smoke commands.
+Unsupported source parameters and missing requested series fail explicitly. RBA dates use ISO codes; DCCEEW requires a metadata-selected sheet group or sheet. Filter custom-source periods in the saved JSON. Macro source_row fields retain raw publisher observations. Comtrade fixes secondary-partner, customs and transport dimensions to totals; get_metadata discloses this scope. See AGENTS.md for development checks.
