@@ -11,10 +11,14 @@ Canonical entrypoints:
 - ausdata_mcp/server.py: tool contracts and concurrent dispatch
 - ausdata_mcp/artifacts.py: complete evidence storage and bounded manifests
 
+Before analysis, confirm the client exposes search_catalog, get_metadata and retrieve directly. Register the stdio server in the client settings if these tools are missing.
+
 Workflow: search_catalog -> select candidate -> get_metadata -> retrieve -> agent reads the complete JSON at artifact_path, filters and analyses it with its own code.
 Prefer in-conversation charts and answers. The retrieval JSON is working evidence; do not create extra PNG, CSV, Excel or report files by default unless the user requests an export or the harness needs a temporary display file.
 If no suitable dataset is retrievable through this MCP, report that limit and ask before seeking data from websites, downloadable workbooks/CSVs or other APIs. Do not imply the publisher lacks the data.
 Search and retrieval have explicit MCP output schemas. Structured and text tool results contain the same data; all metadata results identify dataset_id. The retrieve manifest is a bounded summary, not the full evidence. The agent must have access to the MCP server's artifact_path; there are no post-retrieval MCP tools.
+Reuse previewed codes before browsing more. Codelist searches tolerate case, spacing and punctuation; returned source codes remain unchanged and must be passed verbatim to retrieval. Similar matches remain separate choices; codelists do not establish available observation combinations.
+
 ABS metadata exposes key_order, dimensions and codelists directly. ABS, RBA and DCCEEW metadata preview up to 10 codes per codelist; follow next_offset using get_metadata with dimension, codeSearch and codeOffset. These browsing parameters also apply to Pacific, OECD and Comtrade codelists and World Bank/IMF AREA codes. Comtrade code lists are fetched live; browse REPORTER, PARTNER, HS, FLOW, FREQUENCY, SECOND_PARTNER, CUSTOMS and TRANSPORT. OECD supports dimension selections and preserves separate series by the full SDMX dimension key. For Pacific data, search with provider PDH and use retrieve.sourceFilters to select source codes. Preserve unit multipliers, observation status and publication annotations from the saved JSON. Every source feeds one normalized live catalogue and FTS index, cached per session for 24 hours. Search reports stale/unavailable sources; dataset metadata remains a separate step.
 The calling agent chooses calculations, charts, files and response format. No web app or model API key is needed.
 

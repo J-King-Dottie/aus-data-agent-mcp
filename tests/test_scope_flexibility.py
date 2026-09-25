@@ -3,6 +3,7 @@
 import json
 import tempfile
 import unittest
+from copy import deepcopy
 from pathlib import Path
 from unittest.mock import patch
 
@@ -14,10 +15,66 @@ from test_validation import entry, response
 
 from ausdata_mcp import artifacts, energy_workbook, macro_data, rba_tables, server
 from ausdata_mcp.domestic_data import DomesticDataService
-from ausdata_mcp.selection import sdmx_selection
+from ausdata_mcp.selection import code_page, sdmx_selection
 
 
 class SelectionTests(unittest.TestCase):
+    def test_code_search_tolerates_spacing_and_unicode_punctuation(self):
+        codes = [{"code": "1524", "label": "15 - 24 years"}]
+        for query in ("15-24", "15–24", "15—24 YEARS", " 15   24 ", "1524"):
+            with self.subTest(query=query):
+                page = code_page("test", "AGE", codes, query, 0, 50)
+                self.assertEqual(page["codes"], codes)
+        self.assertEqual(codes[0]["label"], "15 - 24 years")
+
+    def test_code_search_handles_labels_across_subjects_without_rewriting_codes(self):
+        examples = [
+            ("CIV", "Côte d’Ivoire", "CÔTE D'IVOIRE"),
+            ("USD_PC", "US dollars/person", "us dollars / person"),
+            ("_TXCP01_NRG", "All items non-food non-energy", "non food non energy"),
+            ("20", "Seasonally adjusted", "SEASONALLY    ADJUSTED"),
+            ("0010", "Manufacturing, total", "manufacturing total"),
+        ]
+        codes = [{"code": code, "label": label} for code, label, _ in examples]
+        original = deepcopy(codes)
+        for code, label, query in examples:
+            with self.subTest(query=query):
+                result = code_page("test", "DIM", codes, query, 0, 50)
+                self.assertEqual(result["codes"], [{"code": code, "label": label}])
+        self.assertEqual(codes, original)
+        self.assertEqual(code_page("test", "DIM", codes, "0010", 0, 50)["codes"][0]["code"], "0010")
+
+    def test_similar_codes_stay_distinct_and_retrieval_uses_the_selected_code(self):
+        codes = [
+            {"code": "A-B", "label": "First measure"},
+            {"code": "A_B", "label": "Second measure"},
+        ]
+        matches = code_page("test", "DIM", codes, "a b", 0, 50)
+        self.assertEqual(matches["codes"], codes)
+        self.assertEqual(matches["matching_codes"], 2)
+        for item in matches["codes"]:
+            code = item["code"]
+            self.assertEqual(sdmx_selection(["DIM"], {"DIM": [code]}), (code, {"DIM": [code]}))
+
+    def test_normalized_code_search_preserves_pagination_and_source_order(self):
+        codes = [
+            {"code": "A", "label": "15 - 24 years"},
+            {"code": "B", "label": "25 - 34 years"},
+            {"code": "C", "label": "15–24 years"},
+        ]
+        first = code_page("test", "AGE", codes, "15-24", 0, 1)
+        second = code_page("test", "AGE", codes, "15-24", first["next_offset"], 1)
+        self.assertEqual(first["total_codes"], 3)
+        self.assertEqual(first["matching_codes"], 2)
+        self.assertEqual(first["codes"] + second["codes"], [codes[0], codes[2]])
+        self.assertIsNone(second["next_offset"])
+
+    def test_code_search_keeps_literal_matches_and_empty_browsing(self):
+        codes = [{"code": "A_B", "label": "Alpha"}, {"code": "C", "label": "Beta"}]
+        for query, expected in (("", codes), ("_", codes[:1]), ("!!!", []), ("missing", [])):
+            with self.subTest(query=query):
+                self.assertEqual(code_page("test", "DIM", codes, query, 0, 50)["codes"], expected)
+
     def test_named_positional_and_full_scope(self):
         order = ["FREQ", "REF_AREA", "SEX"]
         expected = (".AUS+NZL.F", {"REF_AREA": ["AUS", "NZL"], "SEX": ["F"]})

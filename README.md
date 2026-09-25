@@ -30,6 +30,8 @@ Register the server with any MCP client that supports stdio:
 Use paths from the machine running the client. The included [`.mcp.json`](.mcp.json) is an example for clients that support that project configuration format.
 Its relative launcher path assumes the repository is the client's working directory; use the absolute paths above otherwise. On Windows, the virtual environment interpreter is `.venv\Scripts\python.exe`. A WSL server must be launched through WSL and its evidence paths must be accessible to the agent.
 
+Confirm the client lists `search_catalog`, `get_metadata` and `retrieve` as callable tools before starting an analysis. An example configuration file or a successful standalone server launch does not establish that connection; register the server in the client’s supported settings and reload its MCP connections.
+
 ### Use
 
 1. `search_catalog` finds candidate datasets.
@@ -40,7 +42,7 @@ The workflow is guidance, not an enforced call sequence. The agent chooses the r
 
 The agent reads the JSON at `artifact_path` to analyse the data, so it needs access to the server's filesystem. Tool descriptions specify the call parameters. Analyst guidance is supplied at MCP initialization and through `ausdata://guide`.
 
-Metadata previews are bounded. All eight providers’ code lists can be searched and paged through `get_metadata`; follow `next_offset` to reach remaining codes. Search and retrieval publish explicit output schemas; structured and text results contain the same data. Metadata keeps each source's structure and always identifies `dataset_id`; ABS exposes `key_order`, `dimensions` and bounded `codelists` directly. Unavailable requested selections are disclosed in `coverage_gaps` while available observations are saved. This reports detected gaps, not proof of complete temporal coverage. Invalid inputs, ignored filters, malformed/truncated responses and wholly empty results produce tool errors with repair guidance. Rate limits, timeouts and access failures include specific recovery advice.
+Metadata previews are bounded. Reuse previewed codes; browse only missing ones. Codelist text search tolerates case, spacing and punctuation across all providers. Returned codes are unchanged; pass the selected source code verbatim to retrieval. Similar matches remain separate choices. Codelists describe valid codes, not available combinations; omitted SDMX dimensions can remain unrestricted and be checked in the returned evidence. All eight providers’ code lists can be searched and paged through `get_metadata`; follow `next_offset` to reach remaining codes. Search and retrieval publish explicit output schemas; structured and text results contain the same data. Metadata keeps each source's structure and always identifies `dataset_id`; ABS exposes `key_order`, `dimensions` and bounded `codelists` directly. Unavailable requested selections are disclosed in `coverage_gaps` while available observations are saved. This reports detected gaps, not proof of complete temporal coverage. Invalid inputs, ignored filters, malformed/truncated responses and wholly empty results produce tool errors with repair guidance. Rate limits, timeouts and access failures include specific recovery advice.
 
 ### Sources
 

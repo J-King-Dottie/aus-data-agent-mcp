@@ -426,7 +426,10 @@ def get_metadata(
         ),
     ] = "",
     codeSearch: Annotated[
-        str, Field(description="Case-insensitive code/label text filter; requires dimension.")
+        str,
+        Field(
+            description="Code/label text filter, tolerant of case, spacing and punctuation; requires dimension."
+        ),
     ] = "",
     codeOffset: Annotated[int, Field(ge=0, strict=True)] = 0,
     codeLimit: Annotated[int, Field(ge=1, le=200, strict=True)] = 50,
@@ -434,8 +437,11 @@ def get_metadata(
     """Inspect a selected dataset's definitions and valid retrieval codes.
 
     ABS, RBA and DCCEEW preview 10 codes per codelist. PDH and OECD return structure
-    and codelist references. Browse dimension codes and follow next_offset
-    with the same dimension/codeSearch. Select named sourceFilters or construct a
+    and codelist references. Reuse codes already shown; browse only missing codes
+    and follow next_offset with the same dimension/codeSearch. Search with code or
+    label fragments; use the returned source code verbatim in retrieval, not the label
+    or normalized search text. Similar matches remain separate choices. Codelists
+    describe codes, not which combinations have observations. Use sourceFilters or a
     positional dataKey using key_order (empty positions are wildcards).
     RBA/DCCEEW provide dataKey choices. World Bank/IMF offer AREA code browsing.
     Metadata does not establish observation coverage. Browse Comtrade REPORTER,
@@ -564,7 +570,9 @@ def retrieve(
     ABS/OECD/PDH accept named sourceFilters or a positional dataKey, never both.
     ABS/PDH/RBA/DCCEEW default to all series;
     World Bank/IMF/OECD default to AUS, unless explicit scope is supplied. An OECD
-    sourceFilters request leaves omitted dimensions unrestricted. RBA accepts
+    sourceFilters request leaves omitted dimensions unrestricted. Filter dimensions
+    required by the question; other dimensions can be inspected in the returned data.
+    A specialised dataflow may already select the measure. RBA accepts
     multiple Series IDs joined by +; DCCEEW accepts a sheet, group or all.
     OECD preserves separate series for each full dimension key. Comtrade requires
     explicit trade codes, frequency and years; sourceFilters can override total

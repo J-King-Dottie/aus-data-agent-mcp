@@ -56,11 +56,16 @@ def code_page(
     **context,
 ) -> dict:
     """The same searchable, bounded code page for every provider."""
-    matches = [
-        code
-        for code in codes
-        if search.casefold() in " ".join(str(value) for value in code.values()).casefold()
-    ]
+
+    def normalize(text):
+        return re.sub(r"[\W_]+", " ", text.casefold()).strip()
+
+    query = normalize(search)
+    matches = []
+    for code in codes:
+        text = " ".join(str(value) for value in code.values()).casefold()
+        if search.casefold() in text or (query and query in normalize(text)):
+            matches.append(code)
     page = matches[offset : offset + limit]
     return {
         "dataset_id": dataset_id,
