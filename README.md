@@ -21,14 +21,13 @@ python -m pip install -r requirements.txt
 
 ### Connect an MCP client
 
-The server uses stdio. Use absolute paths when registering it from another project:
+Register the server with any MCP client that supports stdio:
 
-```bash
-codex mcp add ausdata -- /absolute/path/australian-public-data-mcp/.venv/bin/python /absolute/path/australian-public-data-mcp/scripts/run_mcp.py
-claude mcp add --transport stdio ausdata -- /absolute/path/australian-public-data-mcp/.venv/bin/python /absolute/path/australian-public-data-mcp/scripts/run_mcp.py
-```
+- Name: `ausdata`
+- Command: `/absolute/path/australian-public-data-mcp/.venv/bin/python`
+- Arguments: `/absolute/path/australian-public-data-mcp/scripts/run_mcp.py`
 
-The included [`.mcp.json`](.mcp.json) also configures project-local clients when the virtual environment is active.
+Use paths from the machine running the client. The included [`.mcp.json`](.mcp.json) is an example for clients that support that project configuration format.
 
 ### Use
 
