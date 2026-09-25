@@ -1,8 +1,15 @@
 # Australian Public Data MCP
 
-An MCP server for agents to find and retrieve official Australian, Pacific and global public data. Requires Python 3.11+ with SQLite FTS5. No model API key is needed by the server.
+A [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server for AI agents to search live catalogues and retrieve official Australian, Pacific, and global public data. Sources include the Australian Bureau of Statistics (ABS), Reserve Bank of Australia (RBA), DCCEEW's Australian Energy Statistics, Pacific Data Hub/SPC, World Bank, OECD, IMF, and UN Comtrade. No model API key is required.
 
-## Install
+Produced by [Dottie AI Studio](https://dottieaistudio.com.au/).
+Built on existing open source work including [seansoreilly/mcp-server-abs](https://github.com/seansoreilly/mcp-server-abs) and [hanlulong/openecon-data](https://github.com/hanlulong/openecon-data).
+
+## For agents
+
+Requires Python 3.11+ with SQLite FTS5 support.
+
+### Install
 
 ```bash
 git clone https://github.com/J-King-Dottie/australian-public-data-mcp.git
@@ -12,7 +19,7 @@ source .venv/bin/activate
 python -m pip install -r requirements.txt
 ```
 
-## Connect an MCP client
+### Connect an MCP client
 
 The server uses stdio. Use absolute paths when registering it from another project:
 
@@ -23,7 +30,7 @@ claude mcp add --transport stdio ausdata -- /absolute/path/australian-public-dat
 
 The included [`.mcp.json`](.mcp.json) also configures project-local clients when the virtual environment is active.
 
-## Use
+### Use
 
 1. `search_catalog` finds candidate datasets.
 2. `get_metadata` shows a dataset's definitions, dimensions and valid codes.
@@ -31,7 +38,7 @@ The included [`.mcp.json`](.mcp.json) also configures project-local clients when
 
 The agent reads the JSON at `artifact_path` to analyse the data, so it needs access to the server's filesystem. Tool descriptions specify the call parameters. Analyst guidance is supplied at MCP initialization and through `ausdata://guide`.
 
-## Sources
+### Sources
 
 | Source | Coverage |
 | --- | --- |
