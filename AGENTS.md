@@ -17,7 +17,7 @@ This project is an MCP for public-data retrieval and analysis support. The calli
 - `ausdata_mcp/data_config.py`: source configuration without model or database dependencies.
 - `AGENT_SYSTEM_PROMPT.md`: single source of truth for analyst behavior, evidence standards, calculations, caveats and presentation guidance. Supplied to clients at MCP initialization and through `ausdata://guide`.
 - Tool descriptions: single source of truth for call mechanics.
-- `.mcp.json`: project-scoped stdio wiring for Claude Code and compatible clients. Codex registration is documented in README.
+- `.mcp.json`: optional project-local stdio configuration for clients that support this format.
 - `scripts/run_mcp.py`: absolute-path launcher independent of the client's working directory.
 - `benchmarks/`: fixed agent test questions and reviewed results; no benchmark logic belongs in MCP tools.
 
@@ -27,7 +27,7 @@ This project is an MCP for public-data retrieval and analysis support. The calli
 - Preserve search -> shortlist selection -> inspect metadata -> retrieve -> agent reads and analyses the saved data. Reuse known metadata and retrieval files where appropriate. Keep only the three core MCP tools: `search_catalog`, `get_metadata`, `retrieve`.
 - Never require a particular model vendor, app, account, database, output format or approval ceremony for ordinary data analysis.
 - Keep data acquisition inside the MCP's supported pathways unless the user explicitly authorizes another route. If no suitable dataset is retrievable here, the agent should report that specific limitation and ask before seeking workbooks, websites or other APIs; do not imply the publisher has no data.
-- Do not add topic-specific report routes or duplicate analyst prompts. `CLAUDE.md` is only a pointer for that harness.
+- Do not add topic-specific report routes or duplicate analyst prompts.
 - Prefer live official-source retrieval. Discovery fetches live source lists into a disposable normalized file and FTS cache, not a checked-in catalogue or raw data mirror.
 - All providers, including Pacific, share the same session-scoped catalogue and FTS text-match order. Return up to 50 candidates by default without scores or rank labels; the agent selects suitable data after inspecting definitions and coverage. Default sessions start fresh; cache successful source lists for 24 hours, disclose stale/unavailable sources and retry failures after 60 seconds. Keep dataset metadata/codelists separate from catalogue discovery.
 - RBA and DCCEEW routing must use live discovered download URLs. Validate file schemas; never accept an unknown layout as valid observations. Comtrade discovery is a supported-cube descriptor validated against live trade flows, not a complete indicator catalogue.

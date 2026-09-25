@@ -6,7 +6,7 @@ This benchmark evaluates the agent in the current conversation. It does **not** 
 
 For each case, record the start and end time around the agent's actual work, the answer, selected dataset, retrieval artifact path, and whether the answer passes the rubric's checks. Grade `pass`, `partial`, `fail` or `not_assessable`, with a short reason. A provider outage or blocked MCP call is `not_assessable`; a confident answer without verifiable retrieval is not a pass. Record source revisions or other relevant conditions in notes.
 
-Save each completed suite in [results.json](results.json) as a new run. Include the model label selected in the task UI, the Codex/Claude harness name, UTC timestamps, total elapsed time, and per-case elapsed time. If the host exposes reliable per-run input, cached-input and output token counts, record them and calculate cost using a documented pricing source and date. If it only exposes usage for the whole turn, put it at the suite level. If it exposes no reliable token or billing data, leave those fields `null`; do not infer them from account limits or fabricate a cost. Any estimated API-equivalent cost must be labelled as an estimate, not an actual subscription charge.
+Save each completed suite in [results.json](results.json) as a new run. Include the model label selected in the task UI, the client or harness name, UTC timestamps, total elapsed time, and per-case elapsed time. If the host exposes reliable per-run input, cached-input and output token counts, record them and calculate cost using a documented pricing source and date. If it only exposes usage for the whole turn, put it at the suite level. If it exposes no reliable token or billing data, leave those fields `null`; do not infer them from account limits or fabricate a cost. Any estimated API-equivalent cost must be labelled as an estimate, not an actual subscription charge.
 
 Each object in `runs` uses this shape (one case object per question):
 
@@ -14,7 +14,7 @@ Each object in `runs` uses this shape (one case object per question):
 {
   "run_id": "UTC timestamp or unique label",
   "model": "model selected for this task",
-  "harness": "Codex or Claude Code",
+  "harness": "MCP client or agent harness",
   "started_at": "UTC timestamp",
   "finished_at": "UTC timestamp",
   "duration_seconds": 0,
