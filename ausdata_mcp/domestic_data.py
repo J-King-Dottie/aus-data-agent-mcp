@@ -1,52 +1,56 @@
 from __future__ import annotations
 
+import io
 import json
+import math
 import re
-import subprocess
-import tempfile
+import time
 import xml.etree.ElementTree as ET
-from pathlib import Path
-from typing import Any, Dict, List, Optional
+from collections import OrderedDict
+from datetime import UTC, datetime
+from functools import lru_cache
+from threading import RLock
+from typing import Any
 
 import httpx
 
+from . import energy_workbook, rba_tables
 from .data_config import get_data_settings
 
-
 settings = get_data_settings()
-
-ROOT = Path(__file__).resolve().parents[1]
-DCCEEW_SCRIPT_PATH = ROOT / "scripts" / "dcceew_aes_xlsx.py"
-RBA_SCRIPT_PATH = ROOT / "scripts" / "rba_tables_csv.py"
 
 
 def _local_name(tag: str) -> str:
     return str(tag or "").split("}", 1)[-1]
 
 
-def _direct_children(node: Optional[ET.Element], name: str) -> List[ET.Element]:
+def _direct_children(node: ET.Element | None, name: str) -> list[ET.Element]:
     if node is None:
         return []
     return [child for child in list(node) if _local_name(child.tag) == name]
 
 
-def _first_child(node: Optional[ET.Element], name: str) -> Optional[ET.Element]:
+def _first_child(node: ET.Element | None, name: str) -> ET.Element | None:
     children = _direct_children(node, name)
     return children[0] if children else None
 
 
-def _iter_descendants(node: Optional[ET.Element], name: str) -> List[ET.Element]:
+def _iter_descendants(node: ET.Element | None, name: str) -> list[ET.Element]:
     if node is None:
         return []
     return [child for child in node.iter() if _local_name(child.tag) == name]
 
 
-def _localized_text(node: Optional[ET.Element], child_name: str) -> str:
+def _localized_text(node: ET.Element | None, child_name: str) -> str:
     matches = _direct_children(node, child_name)
     if not matches:
         return ""
     for child in matches:
-        lang = child.attrib.get("{http://www.w3.org/XML/1998/namespace}lang") or child.attrib.get("lang") or ""
+        lang = (
+            child.attrib.get("{http://www.w3.org/XML/1998/namespace}lang")
+            or child.attrib.get("lang")
+            or ""
+        )
         if str(lang).strip().lower() == "en":
             return " ".join((child.text or "").split())
     return " ".join((matches[0].text or "").split())
@@ -98,9 +102,8 @@ class ABSApiClient:
         end_period: str = "",
         detail: str = "",
         dimension_at_observation: str = "",
-        format_name: str = "jsondata",
     ) -> Any:
-        params: Dict[str, str] = {"format": format_name}
+        params: dict[str, str] = {"format": "jsondata"}
         if start_period:
             params["startPeriod"] = start_period
         if end_period:
@@ -112,154 +115,135 @@ class ABSApiClient:
         response = self._client.get(
             f"/rest/data/{dataflow_id}/{data_key}",
             params=params,
-            headers={"Accept": "application/vnd.sdmx.data+json" if format_name == "jsondata" else "application/xml"},
+            headers={"Accept": "application/vnd.sdmx.data+json"},
         )
         response.raise_for_status()
-        if format_name == "jsondata":
-            payload = response.json()
-            if isinstance(payload, dict):
-                payload["api_request_url"] = str(response.request.url)
-            return payload
-        return response.text
+        payload = response.json()
+        if isinstance(payload, dict):
+            payload["api_request_url"] = str(response.request.url)
+        return payload
 
 
 class CustomDomesticService:
-    def __init__(self, script_path: Path, flow_type: str, suffix: str) -> None:
-        self.script_path = script_path
+    """Download and parse supported official files in process.
+
+    Reuse up to four parsed files for an hour so metadata followed by retrieval
+    does not download and parse the same workbook or table twice. The live
+    download URL is part of the cache key; forceRefresh bypasses this cache.
+    """
+
+    def __init__(self, flow_type: str) -> None:
         self.flow_type = flow_type
-        self.suffix = suffix
+        self._cache = OrderedDict()
+        self._lock = RLock()
 
-    def supports(self, flow: Dict[str, Any]) -> bool:
-        return _clean_text(flow.get("flowType")) == self.flow_type
+    def supports(self, flow: dict[str, Any]) -> bool:
+        return flow.get("flowType") == self.flow_type
 
-    def get_metadata(self, flow: Dict[str, Any]) -> Dict[str, Any]:
-        source_path = self._download_to_temp(flow)
-        try:
-            return self._run_script("metadata", flow, source_path)
-        finally:
-            source_path.unlink(missing_ok=True)
-
-    def resolve(self, flow: Dict[str, Any], *, data_key: str = "all", detail: str = "full") -> Dict[str, Any]:
-        source_path = self._download_to_temp(flow)
-        try:
-            payload = self._run_script("resolve", flow, source_path, data_key=data_key, detail=detail)
-            if isinstance(payload, dict):
-                payload.setdefault("api_request_url", _clean_text(flow.get("sourceUrl")))
-            return payload
-        finally:
-            source_path.unlink(missing_ok=True)
-
-    def _download_to_temp(self, flow: Dict[str, Any]) -> Path:
-        source_url = _clean_text(flow.get("sourceUrl"))
-        if not source_url:
-            raise RuntimeError(f"Custom flow {_clean_text(flow.get('id'))} is missing sourceUrl.")
-        suffix = self.suffix
-        handle = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
-        temp_path = Path(handle.name)
-        handle.close()
-        try:
-            with httpx.Client(timeout=120.0, follow_redirects=True, headers={"User-Agent": "Mozilla/5.0"}) as client:
-                with client.stream("GET", source_url) as response:
-                    response.raise_for_status()
-                    with temp_path.open("wb") as out:
-                        for chunk in response.iter_bytes():
-                            out.write(chunk)
-        except Exception:
-            temp_path.unlink(missing_ok=True)
-            raise
-        return temp_path
-
-    def _run_script(
-        self,
-        command: str,
-        flow: Dict[str, Any],
-        source_path: Path,
-        *,
-        data_key: str = "all",
-        detail: str = "full",
-    ) -> Dict[str, Any]:
-        path_flag = "--xlsx" if self.suffix == ".xlsx" else "--csv"
-        args = [
-            settings.python_binary,
-            str(self.script_path),
-            command,
-            path_flag,
-            str(source_path),
-            "--dataset-id",
-            _clean_text(flow.get("id")),
-            "--agency-id",
-            _clean_text(flow.get("agencyID")),
-            "--version",
-            _clean_text(flow.get("version")),
-            "--name",
-            _clean_text(flow.get("name")),
-            "--description",
-            _clean_text(flow.get("description")),
-            "--curation-json",
-            json.dumps(flow.get("curation") or {}),
-        ]
-        if command == "resolve":
-            args.extend(["--data-key", data_key or "all", "--detail", detail or "full"])
-        result = subprocess.run(
-            args,
-            cwd=str(ROOT),
-            capture_output=True,
-            text=True,
-            check=False,
+    def _parsed(self, flow: dict[str, Any], force_refresh: bool):
+        url = flow["sourceUrl"]
+        with self._lock:
+            cached = self._cache.get(url)
+            if cached and not force_refresh and time.monotonic() - cached[0] < 3600:
+                self._cache.move_to_end(url)
+                return cached[1], cached[2], True
+        response = httpx.get(
+            url, timeout=120, follow_redirects=True, headers={"User-Agent": "AusData-MCP/1.0"}
         )
-        if result.returncode != 0:
-            message = (result.stderr or result.stdout or "").strip()
-            raise RuntimeError(message or f"Custom domestic script failed: {self.script_path.name}")
-        parsed = json.loads(result.stdout)
-        if not isinstance(parsed, dict):
-            raise RuntimeError(f"Custom domestic script returned unexpected payload type: {self.script_path.name}")
-        return parsed
+        response.raise_for_status()
+        if self.flow_type == "rba_tables_csv":
+            parsed = rba_tables.parse_table(rba_tables.load_rows(response.content))
+        else:
+            parsed = energy_workbook.load_workbook(io.BytesIO(response.content))
+        with self._lock:
+            fetched_at = datetime.now(UTC).isoformat(timespec="milliseconds")
+            self._cache[url] = (time.monotonic(), parsed, fetched_at)
+            self._cache.move_to_end(url)
+            while len(self._cache) > 4:
+                self._cache.popitem(last=False)
+        return parsed, fetched_at, False
+
+    def get_metadata(self, flow: dict[str, Any], force_refresh: bool = False) -> dict[str, Any]:
+        parsed, fetched_at, cached = self._parsed(flow, force_refresh)
+        if self.flow_type == "rba_tables_csv":
+            result = rba_tables.build_metadata(flow, parsed, flow.get("curation", {}))
+        else:
+            curation = energy_workbook.discover_curation(parsed)
+            result = energy_workbook.build_metadata(flow, curation, parsed)
+        return {
+            **result,
+            "source_url": flow["sourceUrl"],
+            "source_fetched_at": fetched_at,
+            "source_cache_hit": cached,
+        }
+
+    def resolve(
+        self, flow: dict[str, Any], *, data_key: str = "all", force_refresh: bool = False
+    ) -> dict[str, Any]:
+        parsed, fetched_at, cached = self._parsed(flow, force_refresh)
+        if self.flow_type == "rba_tables_csv":
+            payload = rba_tables.build_resolved_dataset(
+                flow, parsed, flow.get("curation", {}), data_key
+            )
+        else:
+            curation = energy_workbook.discover_curation(parsed)
+            payload = energy_workbook.build_resolved_dataset(flow, curation, parsed, data_key)
+        payload["api_request_url"] = flow["sourceUrl"]
+        payload["source_fetched_at"] = fetched_at
+        payload["source_cache_hit"] = cached
+        return payload
 
 
 class DomesticDataService:
     def __init__(self) -> None:
         self.api_client = ABSApiClient()
-        self.dcceew_service = CustomDomesticService(DCCEEW_SCRIPT_PATH, "dcceew_aes_xlsx", ".xlsx")
-        self.rba_service = CustomDomesticService(RBA_SCRIPT_PATH, "rba_tables_csv", ".csv")
-        self._abs_flows_cache: Optional[List[Dict[str, Any]]] = None
+        self._structures = OrderedDict()
+        self._metadata_lock = RLock()
+        self.dcceew_service = CustomDomesticService("dcceew_aes_xlsx")
+        self.rba_service = CustomDomesticService("rba_tables_csv")
 
-    def get_abs_data_flows(self, force_refresh: bool = False) -> List[Dict[str, Any]]:
-        if force_refresh or self._abs_flows_cache is None:
-            self._abs_flows_cache = self._fetch_abs_dataflows()
-        return [dict(flow) for flow in self._abs_flows_cache]
+    def get_abs_data_flows(self) -> list[dict[str, Any]]:
+        # Discovery freshness is owned by the unified catalogue.
+        return self._fetch_abs_dataflows()
 
-    def get_data_flows(self, force_refresh: bool = False) -> List[Dict[str, Any]]:
-        from .unified_catalog import ensure_unified_catalog_artifacts
-        catalogue = ensure_unified_catalog_artifacts(force_refresh)
-        return [dict(entry["sourceRecord"]) for entry in catalogue["entries"]
-                if entry.get("route") == "domestic" and entry.get("sourceRecord")]
+    def resolve_flow(self, dataflow_identifier: str) -> dict[str, Any]:
+        from .unified_catalog import get_unified_catalog_entry
 
-    def resolve_flow(self, dataflow_identifier: str, force_refresh: bool = False) -> Dict[str, Any]:
-        parsed = self.parse_dataflow_identifier(dataflow_identifier)
-        # force_refresh belongs to dataset metadata/data, not catalogue discovery.
-        flows = self.get_data_flows(False)
-        candidates = [flow for flow in flows if flow["id"] == parsed["dataflowId"]
-                      and (not parsed["agencyId"] or flow["agencyID"] == parsed["agencyId"])
-                      and (not parsed["version"] or flow["version"] == parsed["version"])]
-        selected = self.select_latest_flow(candidates)
-        if selected is None:
-            raise RuntimeError(f"Unknown dataflow identifier: {dataflow_identifier}. Refresh catalogue discovery if needed.")
-        return selected
+        entry = get_unified_catalog_entry(dataflow_identifier)
+        if not entry or entry.get("route") != "domestic" or not entry.get("sourceRecord"):
+            raise ValueError(
+                f"Unknown domestic datasetId: {dataflow_identifier}. Search the catalogue first."
+            )
+        return entry["sourceRecord"]
 
-    def get_data_structure_for_dataflow(self, dataflow_identifier: str, force_refresh: bool = False) -> Dict[str, Any]:
-        flow = self.resolve_flow(dataflow_identifier, force_refresh)
+    def get_data_structure_for_dataflow(
+        self, dataflow_identifier: str, force_refresh: bool = False
+    ) -> dict[str, Any]:
+        flow = self.resolve_flow(dataflow_identifier)
         if self.dcceew_service.supports(flow):
-            return self.dcceew_service.get_metadata(flow)
+            return self.dcceew_service.get_metadata(flow, force_refresh)
         if self.rba_service.supports(flow):
-            return self.rba_service.get_metadata(flow)
+            return self.rba_service.get_metadata(flow, force_refresh)
         structure = flow.get("structure") if isinstance(flow.get("structure"), dict) else {}
         structure_id = _clean_text(structure.get("id")) or _clean_text(flow.get("id"))
-        agency_id = _clean_text(structure.get("agencyID")) or _clean_text(flow.get("agencyID")) or "ABS"
+        agency_id = (
+            _clean_text(structure.get("agencyID")) or _clean_text(flow.get("agencyID")) or "ABS"
+        )
         version = _clean_text(structure.get("version")) or _clean_text(flow.get("version"))
+        key = (agency_id, structure_id, version)
+        with self._metadata_lock:
+            cached = self._structures.get(key)
+            if cached and not force_refresh and time.monotonic() - cached[0] < 3600:
+                self._structures.move_to_end(key)
+                return {**cached[1], "dataflow": flow}
         xml_text = self.api_client.get_data_structure_xml(agency_id, structure_id, version)
         metadata = self._extract_data_structure(xml_text)
-        metadata["dataflow"] = flow
-        return metadata
+        with self._metadata_lock:
+            self._structures[key] = (time.monotonic(), metadata)
+            self._structures.move_to_end(key)
+            while len(self._structures) > 64:
+                self._structures.popitem(last=False)
+        return {**metadata, "dataflow": flow}
 
     def resolve_dataset(
         self,
@@ -271,15 +255,19 @@ class DomesticDataService:
         detail: str = "",
         dimension_at_observation: str = "",
         force_refresh: bool = False,
-    ) -> Dict[str, Any]:
-        flow = self.resolve_flow(dataset_id, force_refresh)
+    ) -> dict[str, Any]:
+        flow = self.resolve_flow(dataset_id)
         clean_data_key = _clean_text(data_key) or "all"
         clean_detail = _clean_text(detail) or "full"
         if self.dcceew_service.supports(flow):
-            return self.dcceew_service.resolve(flow, data_key=clean_data_key, detail=clean_detail)
+            return self.dcceew_service.resolve(
+                flow, data_key=clean_data_key, force_refresh=force_refresh
+            )
         if self.rba_service.supports(flow):
-            return self.rba_service.resolve(flow, data_key=clean_data_key, detail=clean_detail)
-        full_dataset_id = self.format_dataflow_identifier(flow)
+            return self.rba_service.resolve(
+                flow, data_key=clean_data_key, force_refresh=force_refresh
+            )
+        full_dataset_id = dataset_id
         clean_dimension = _clean_text(dimension_at_observation) or "TIME_PERIOD"
         payload = self.api_client.get_data(
             full_dataset_id,
@@ -288,7 +276,6 @@ class DomesticDataService:
             end_period=_clean_text(end_period),
             detail=clean_detail,
             dimension_at_observation=clean_dimension,
-            format_name="jsondata",
         )
         return self._transform_json_data(
             flow,
@@ -302,16 +289,16 @@ class DomesticDataService:
             payload,
         )
 
-    def _fetch_abs_dataflows(self) -> List[Dict[str, Any]]:
+    def _fetch_abs_dataflows(self) -> list[dict[str, Any]]:
         root = ET.fromstring(self.api_client.get_dataflows_xml("ABS"))
-        flows: List[Dict[str, Any]] = []
+        flows: list[dict[str, Any]] = []
         for flow in _iter_descendants(root, "Dataflow"):
             flow_id = _clean_text(flow.attrib.get("id"))
             agency_id = _clean_text(flow.attrib.get("agencyID")) or "ABS"
             version = _clean_text(flow.attrib.get("version"))
             if not flow_id:
                 continue
-            item: Dict[str, Any] = {
+            item: dict[str, Any] = {
                 "id": flow_id,
                 "agencyID": agency_id,
                 "version": version,
@@ -329,7 +316,7 @@ class DomesticDataService:
             flows.append(item)
         return flows
 
-    def _extract_data_structure(self, xml_text: str) -> Dict[str, Any]:
+    def _extract_data_structure(self, xml_text: str) -> dict[str, Any]:
         root = ET.fromstring(xml_text)
         data_structure_node = None
         for node in _iter_descendants(root, "DataStructure"):
@@ -356,16 +343,18 @@ class DomesticDataService:
             "concepts": concepts,
         }
 
-    def _extract_dimensions(self, data_structure_node: ET.Element) -> List[Dict[str, Any]]:
+    def _extract_dimensions(self, data_structure_node: ET.Element) -> list[dict[str, Any]]:
         components = _first_child(data_structure_node, "DataStructureComponents")
         dimension_list = _first_child(components, "DimensionList")
-        result: List[Dict[str, Any]] = []
+        result: list[dict[str, Any]] = []
         for index, dimension in enumerate(_direct_children(dimension_list, "Dimension"), start=1):
             concept_identity = _first_child(dimension, "ConceptIdentity")
             concept_ref = _first_child(concept_identity, "Ref")
             local_representation = _first_child(dimension, "LocalRepresentation")
             representation = _first_child(dimension, "Representation")
-            enumeration = _first_child(local_representation, "Enumeration") or _first_child(representation, "Enumeration")
+            enumeration = _first_child(local_representation, "Enumeration")
+            if enumeration is None:
+                enumeration = _first_child(representation, "Enumeration")
             enum_ref = _first_child(enumeration, "Ref")
             codelist = None
             if enum_ref is not None:
@@ -374,27 +363,32 @@ class DomesticDataService:
                     "agencyID": _clean_text(enum_ref.attrib.get("agencyID")),
                     "version": _clean_text(enum_ref.attrib.get("version")),
                 }
+            role_ref = _first_child(_first_child(dimension, "Role"), "Ref")
             result.append(
                 {
                     "id": _clean_text(dimension.attrib.get("id")),
                     "position": int(dimension.attrib.get("position") or index),
-                    "conceptId": _clean_text(concept_ref.attrib.get("id")) if concept_ref is not None else "",
-                    "role": _clean_text((_first_child(_first_child(dimension, "Role"), "Ref") or ET.Element("")).attrib.get("id")),
+                    "conceptId": _clean_text(concept_ref.attrib.get("id"))
+                    if concept_ref is not None
+                    else "",
+                    "role": _clean_text(role_ref.get("id")) if role_ref is not None else "",
                     "codelist": codelist,
                 }
             )
         return result
 
-    def _extract_attributes(self, data_structure_node: ET.Element) -> List[Dict[str, Any]]:
+    def _extract_attributes(self, data_structure_node: ET.Element) -> list[dict[str, Any]]:
         components = _first_child(data_structure_node, "DataStructureComponents")
         attribute_list = _first_child(components, "AttributeList")
-        result: List[Dict[str, Any]] = []
+        result: list[dict[str, Any]] = []
         for attribute in _direct_children(attribute_list, "Attribute"):
             concept_identity = _first_child(attribute, "ConceptIdentity")
             concept_ref = _first_child(concept_identity, "Ref")
             local_representation = _first_child(attribute, "LocalRepresentation")
             representation = _first_child(attribute, "Representation")
-            enumeration = _first_child(local_representation, "Enumeration") or _first_child(representation, "Enumeration")
+            enumeration = _first_child(local_representation, "Enumeration")
+            if enumeration is None:
+                enumeration = _first_child(representation, "Enumeration")
             enum_ref = _first_child(enumeration, "Ref")
             codelist = None
             if enum_ref is not None:
@@ -403,45 +397,57 @@ class DomesticDataService:
                     "agencyID": _clean_text(enum_ref.attrib.get("agencyID")),
                     "version": _clean_text(enum_ref.attrib.get("version")),
                 }
-            attachment_level = _clean_text(attribute.attrib.get("attachmentLevel") or attribute.attrib.get("AttachmentLevel"))
+            attachment_level = _clean_text(
+                attribute.attrib.get("attachmentLevel") or attribute.attrib.get("AttachmentLevel")
+            )
             result.append(
                 {
                     "id": _clean_text(attribute.attrib.get("id")),
                     "assignmentStatus": _clean_text(attribute.attrib.get("assignmentStatus")),
                     "attachmentLevel": attachment_level,
-                    "conceptId": _clean_text(concept_ref.attrib.get("id")) if concept_ref is not None else "",
+                    "conceptId": _clean_text(concept_ref.attrib.get("id"))
+                    if concept_ref is not None
+                    else "",
                     "codelist": codelist,
-                    "relatedTo": self._extract_attribute_relationship(_first_child(attribute, "AttributeRelationship")) or None,
+                    "relatedTo": self._extract_attribute_relationship(
+                        _first_child(attribute, "AttributeRelationship")
+                    )
+                    or None,
                 }
             )
         return result
 
-    def _extract_attribute_relationship(self, relationship_node: Optional[ET.Element]) -> List[str]:
+    def _extract_attribute_relationship(self, relationship_node: ET.Element | None) -> list[str]:
         if relationship_node is None:
             return []
-        related: List[str] = []
+        related: list[str] = []
         for dimension in _direct_children(relationship_node, "Dimension"):
             ref = _first_child(dimension, "Ref")
-            identifier = _clean_text((ref or dimension).attrib.get("id"))
+            identifier = _clean_text((ref if ref is not None else dimension).attrib.get("id"))
             if identifier and identifier not in related:
                 related.append(identifier)
         for group in _direct_children(relationship_node, "Group"):
             ref = _first_child(group, "Ref")
-            identifier = _clean_text((ref or group).attrib.get("id"))
+            identifier = _clean_text((ref if ref is not None else group).attrib.get("id"))
             if identifier and identifier not in related:
                 related.append(identifier)
         primary_measure = _first_child(_first_child(relationship_node, "PrimaryMeasure"), "Ref")
-        measure_id = _clean_text(primary_measure.attrib.get("id")) if primary_measure is not None else ""
+        measure_id = (
+            _clean_text(primary_measure.attrib.get("id")) if primary_measure is not None else ""
+        )
         if measure_id and measure_id not in related:
             related.append(measure_id)
-        if _first_child(relationship_node, "Observation") is not None and "OBSERVATION" not in related:
+        if (
+            _first_child(relationship_node, "Observation") is not None
+            and "OBSERVATION" not in related
+        ):
             related.append("OBSERVATION")
         return related
 
-    def _extract_codelists(self, root: ET.Element) -> List[Dict[str, Any]]:
-        result: List[Dict[str, Any]] = []
+    def _extract_codelists(self, root: ET.Element) -> list[dict[str, Any]]:
+        result: list[dict[str, Any]] = []
         for codelist in _iter_descendants(root, "Codelist"):
-            codes: List[Dict[str, Any]] = []
+            codes: list[dict[str, Any]] = []
             for code in _direct_children(codelist, "Code"):
                 parent = _first_child(code, "Parent")
                 parent_ref = _first_child(parent, "Ref")
@@ -450,7 +456,9 @@ class DomesticDataService:
                         "id": _clean_text(code.attrib.get("id")),
                         "name": _localized_text(code, "Name"),
                         "description": _localized_text(code, "Description"),
-                        "parentID": _clean_text((parent_ref or ET.Element("")).attrib.get("id")),
+                        "parentID": _clean_text(parent_ref.get("id"))
+                        if parent_ref is not None
+                        else "",
                     }
                 )
             result.append(
@@ -465,8 +473,8 @@ class DomesticDataService:
             )
         return result
 
-    def _extract_concepts(self, root: ET.Element) -> List[Dict[str, Any]]:
-        result: List[Dict[str, Any]] = []
+    def _extract_concepts(self, root: ET.Element) -> list[dict[str, Any]]:
+        result: list[dict[str, Any]] = []
         for scheme in _iter_descendants(root, "ConceptScheme"):
             scheme_info = {
                 "id": _clean_text(scheme.attrib.get("id")),
@@ -485,114 +493,118 @@ class DomesticDataService:
                 )
         return result
 
-    def _transform_json_data(self, flow: Dict[str, Any], query: Dict[str, Any], payload: Any) -> Dict[str, Any]:
+    def _transform_json_data(
+        self, flow: dict[str, Any], query: dict[str, Any], payload: Any
+    ) -> dict[str, Any]:
         errors = payload.get("errors") if isinstance(payload, dict) else None
-        if isinstance(errors, list) and errors:
+        if errors:
             raise RuntimeError(f"ABS API returned errors: {json.dumps(errors)}")
-        data_envelope = payload.get("data") if isinstance(payload, dict) else None
-        if not isinstance(data_envelope, dict):
+        data = payload.get("data") if isinstance(payload, dict) else None
+        if not isinstance(data, dict):
             raise RuntimeError("ABS response did not include a data section.")
-        structures = data_envelope.get("structures")
-        structure = structures[0] if isinstance(structures, list) and structures else None
-        if not isinstance(structure, dict):
-            raise RuntimeError("ABS response did not include structure metadata.")
-        series_dimensions = self._to_list(((structure.get("dimensions") or {}).get("series") if isinstance(structure.get("dimensions"), dict) else None))
-        observation_dimensions = self._to_list(((structure.get("dimensions") or {}).get("observation") if isinstance(structure.get("dimensions"), dict) else None))
-        series_attribute_defs = self._to_list(((structure.get("attributes") or {}).get("series") if isinstance(structure.get("attributes"), dict) else None))
-        observation_attribute_defs = self._to_list(((structure.get("attributes") or {}).get("observation") if isinstance(structure.get("attributes"), dict) else None))
-        data_sets = self._to_list(data_envelope.get("dataSets"))
-        dataset = data_sets[0] if data_sets else None
-        if not isinstance(dataset, dict):
-            raise RuntimeError("ABS response did not include dataset observations.")
-        dimension_map = self._build_dimension_lookup([*series_dimensions, *observation_dimensions])
-        series_groups: Dict[str, Dict[str, Any]] = {}
-        observation_count = 0
-        series_entries = dataset.get("series").items() if isinstance(dataset.get("series"), dict) else []
-        for series_key, series_entry in series_entries:
-            group = series_groups.setdefault(series_key, {"seriesKey": series_key, "observations": []})
-            series_index_values = self._parse_key_indices(series_key, len(series_dimensions))
-            series_coordinates = self._build_coordinate_record(series_dimensions, series_index_values)
-            condensed_series_coordinates = self._to_condensed_coordinate_map(series_coordinates)
-            if condensed_series_coordinates:
-                group["dimensions"] = condensed_series_coordinates
-            series_attributes = self._compact_attributes(
-                self._map_attribute_values(
-                    series_attribute_defs,
-                    series_entry.get("attributes") if isinstance(series_entry, dict) else [],
-                )
+        structures, datasets = data.get("structures", []), data.get("dataSets", [])
+        if len(structures) != 1 or len(datasets) != 1:
+            raise RuntimeError(
+                "ABS response must contain exactly one structure and dataset; incomplete data was not accepted."
             )
-            if series_attributes:
-                group["attributes"] = series_attributes
-            observations = series_entry.get("observations") if isinstance(series_entry, dict) else {}
-            for observation_key, value_array in observations.items():
-                observation_indices = self._parse_key_indices(observation_key, len(observation_dimensions))
-                observation_coordinates = self._build_coordinate_record(observation_dimensions, observation_indices)
-                condensed_observation_coordinates = self._to_condensed_coordinate_map(observation_coordinates)
-                observation_attributes = self._compact_attributes(
-                    self._map_attribute_values(
-                        observation_attribute_defs,
-                        value_array[1:] if isinstance(value_array, list) else [],
-                    )
+        structure, dataset = structures[0], datasets[0]
+        dimensions = structure.get("dimensions", {})
+        attributes = structure.get("attributes", {})
+        dataset_dimensions = dimensions.get("dataSet", [])
+        series_dimensions = dimensions.get("series", [])
+        observation_dimensions = dimensions.get("observation", [])
+        dataset_coordinates = self._build_coordinate_record(
+            dataset_dimensions, [0] * len(dataset_dimensions)
+        )
+        dataset_attributes = self._map_attribute_values(
+            attributes.get("dataSet", []), dataset.get("attributes", [])
+        )
+
+        def observations(raw):
+            if not isinstance(raw, dict):
+                raise RuntimeError("ABS response contains invalid observations.")
+            result = []
+            for key, values in raw.items():
+                if not isinstance(values, list) or not values:
+                    raise RuntimeError("ABS response contains an invalid observation value array.")
+                indices = self._parse_key_indices(key, len(observation_dimensions))
+                attrs = self._map_attribute_values(attributes.get("observation", []), values[1:])
+                value = self._coerce_value(values[0])
+                if values[0] is not None and value is None:
+                    attrs["OBS_VALUE_RAW"] = str(values[0])
+                result.append(
+                    {
+                        "observationKey": key,
+                        "value": value,
+                        "dimensions": self._build_coordinate_record(
+                            observation_dimensions, indices
+                        ),
+                        "attributes": attrs,
+                    }
                 )
-                observation: Dict[str, Any] = {
-                    "observationKey": observation_key,
-                    "value": self._coerce_value(value_array[0] if isinstance(value_array, list) and value_array else value_array),
+            return result
+
+        groups = []
+        raw_series = dataset.get("series", {})
+        if not isinstance(raw_series, dict):
+            raise RuntimeError("ABS response contains invalid series.")
+        if raw_series and dataset.get("observations"):
+            raise RuntimeError(
+                "ABS response mixes series and dataset observations; refusing to drop records."
+            )
+        for key, item in raw_series.items():
+            indices = self._parse_key_indices(key, len(series_dimensions))
+            groups.append(
+                {
+                    "seriesKey": key,
+                    "dimensions": {
+                        **dataset_coordinates,
+                        **self._build_coordinate_record(series_dimensions, indices),
+                    },
+                    "attributes": {
+                        **dataset_attributes,
+                        **self._map_attribute_values(
+                            attributes.get("series", []), item.get("attributes", [])
+                        ),
+                    },
+                    "observations": observations(item.get("observations", {})),
                 }
-                if condensed_observation_coordinates:
-                    observation["dimensions"] = condensed_observation_coordinates
-                if observation_attributes:
-                    observation["attributes"] = observation_attributes
-                group["observations"].append(observation)
-                observation_count += 1
-        if not series_groups:
-            group = series_groups.setdefault("__all__", {"seriesKey": "__all__", "observations": []})
-            for observation_key, value_array in (dataset.get("observations") or {}).items():
-                observation_indices = self._parse_key_indices(observation_key, len(observation_dimensions))
-                observation_coordinates = self._build_coordinate_record(observation_dimensions, observation_indices)
-                condensed_observation_coordinates = self._to_condensed_coordinate_map(observation_coordinates)
-                observation_attributes = self._compact_attributes(
-                    self._map_attribute_values(
-                        observation_attribute_defs,
-                        value_array[1:] if isinstance(value_array, list) else [],
-                    )
-                )
-                observation = {
-                    "observationKey": observation_key,
-                    "value": self._coerce_value(value_array[0] if isinstance(value_array, list) and value_array else value_array),
+            )
+        if not raw_series and dataset.get("observations"):
+            if series_dimensions:
+                raise RuntimeError("ABS response omits coordinates for its series dimensions.")
+            groups.append(
+                {
+                    "seriesKey": "__all__",
+                    "dimensions": dataset_coordinates,
+                    "attributes": dataset_attributes,
+                    "observations": observations(dataset["observations"]),
                 }
-                if condensed_observation_coordinates:
-                    observation["dimensions"] = condensed_observation_coordinates
-                if observation_attributes:
-                    observation["attributes"] = observation_attributes
-                group["observations"].append(observation)
-                observation_count += 1
-        series = sorted(series_groups.values(), key=lambda item: str(item.get("seriesKey") or ""))
-        dimension_lookup = {key: value for key, value in dimension_map.items() if value}
-        summary = {"dataKey": query.get("dataKey"), "detail": query.get("detail")}
-        if query.get("startPeriod"):
-            summary["startPeriod"] = query["startPeriod"]
-        if query.get("endPeriod"):
-            summary["endPeriod"] = query["endPeriod"]
-        if query.get("dimensionAtObservation"):
-            summary["dimensionAtObservation"] = query["dimensionAtObservation"]
-        api_request_url = _clean_text(payload.get("api_request_url")) if isinstance(payload, dict) else ""
+            )
+        count = sum(len(item["observations"]) for item in groups)
+        if not count:
+            raise RuntimeError("ABS returned no observations for the selected anchor and periods.")
         return {
+            "provider": "ABS",
             "dataset": {
-                "id": _clean_text(flow.get("id")),
-                "agencyID": _clean_text(flow.get("agencyID")),
-                "version": _clean_text(flow.get("version")),
-                "name": _clean_text(flow.get("name")),
-                "description": _clean_text(flow.get("description")),
+                key: flow.get(key, "")
+                for key in ("id", "agencyID", "version", "name", "description")
             },
-            "query": summary,
-            "api_request_url": api_request_url,
-            "dimensions": dimension_lookup,
-            "observationCount": observation_count,
-            "series": series,
+            "query": {key: value for key, value in query.items() if value},
+            "api_request_url": payload.get("api_request_url", ""),
+            "dimensions": self._build_dimension_lookup(
+                [*dataset_dimensions, *series_dimensions, *observation_dimensions]
+            ),
+            "observationCount": count,
+            "series": sorted(groups, key=lambda item: item["seriesKey"]),
+            "source_structure": structure,
+            "source_annotations": {
+                key: payload[key] for key in ("meta", "header") if key in payload
+            },
         }
 
-    def _build_dimension_lookup(self, dimensions: List[Any]) -> Dict[str, Dict[str, str]]:
-        lookup: Dict[str, Dict[str, str]] = {}
+    def _build_dimension_lookup(self, dimensions: list[Any]) -> dict[str, dict[str, str]]:
+        lookup: dict[str, dict[str, str]] = {}
         for dimension in dimensions:
             if not isinstance(dimension, dict):
                 continue
@@ -611,93 +623,66 @@ class DomesticDataService:
                 registry[code] = label
         return lookup
 
-    def _build_coordinate_record(self, dimensions: List[Any], indices: List[int]) -> Dict[str, Dict[str, Any]]:
-        record: Dict[str, Dict[str, Any]] = {}
-        for idx, dimension in enumerate(dimensions):
-            if not isinstance(dimension, dict):
-                continue
-            index = indices[idx] if idx < len(indices) else 0
-            dimension_id = _clean_text(dimension.get("id")) or f"DIM_{idx}"
-            values = self._to_list(dimension.get("values"))
-            value_meta = values[index] if index < len(values) else {}
-            record[dimension_id] = {
-                "code": _clean_text(value_meta.get("id")) or str(index),
-                "label": self._extract_name(value_meta),
-                "description": self._extract_description(value_meta),
-            }
+    def _build_coordinate_record(
+        self, dimensions: list[Any], indices: list[int]
+    ) -> dict[str, dict[str, Any]]:
+        record = {}
+        for dimension, index in zip(dimensions, indices, strict=True):
+            values = dimension.get("values", [])
+            if not 0 <= index < len(values) or not isinstance(values[index], dict):
+                raise RuntimeError(
+                    f"ABS returned an invalid coordinate for {dimension.get('id')}: {index}."
+                )
+            value = values[index]
+            if not value.get("id"):
+                raise RuntimeError("ABS returned a dimension value without its source code.")
+            record[dimension["id"]] = {"code": str(value["id"]), "label": self._extract_name(value)}
         return record
 
-    def _to_condensed_coordinate_map(self, coordinates: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str, str]]:
-        result: Dict[str, Dict[str, str]] = {}
-        for dimension_id, value in coordinates.items():
-            code = _clean_text(value.get("code"))
-            if not code:
-                continue
-            entry: Dict[str, str] = {"code": code}
-            label = _clean_text(value.get("label"))
-            if label and label != code:
-                entry["label"] = label
-            result[dimension_id] = entry
-        return result
-
-    def _map_attribute_values(self, definitions: List[Any], values: Any) -> Dict[str, Any]:
-        result: Dict[str, Any] = {}
+    def _map_attribute_values(self, definitions: list[Any], values: Any) -> dict[str, Any]:
+        result: dict[str, Any] = {}
         raw_values = values if isinstance(values, list) else []
         for index, definition in enumerate(definitions):
             value = raw_values[index] if index < len(raw_values) else None
             if value in (None, ""):
                 continue
-            key = _clean_text(definition.get("id")) if isinstance(definition, dict) else f"ATTR_{index}"
-            result[key] = self._lookup_value(definition.get("values") if isinstance(definition, dict) else [], value)
+            key = (
+                _clean_text(definition.get("id"))
+                if isinstance(definition, dict)
+                else f"ATTR_{index}"
+            )
+            result[key] = self._lookup_value(
+                definition.get("values") if isinstance(definition, dict) else [], value
+            )
         return result
 
     def _lookup_value(self, options: Any, value: Any) -> Any:
         if not isinstance(options, list) or not options:
             return value
-        value_as_string = str(value)
-        for option in options:
-            if isinstance(option, dict) and str(option.get("id")) == value_as_string:
-                return self._extract_name(option) or value_as_string
-        try:
-            numeric_index = int(value)
-        except Exception:
-            numeric_index = -1
-        if 0 <= numeric_index < len(options) and isinstance(options[numeric_index], dict):
-            return self._extract_name(options[numeric_index]) or value
-        return value
+        # SDMX-JSON attribute values are indexes, even when a code looks numeric.
+        if not isinstance(value, int) or isinstance(value, bool) or not 0 <= value < len(options):
+            raise RuntimeError(f"ABS returned an invalid attribute index: {value!r}.")
+        option = options[value]
+        return {"code": str(option["id"]), "label": self._extract_name(option)}
 
     def _coerce_value(self, value: Any) -> Any:
-        if value is None:
+        if value is None or isinstance(value, bool):
             return None
-        if isinstance(value, (int, float)):
-            return value
-        if isinstance(value, str):
-            try:
-                numeric = float(value)
-                return int(numeric) if numeric.is_integer() else numeric
-            except Exception:
-                return value
-        return value
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(numeric):
+            return None
+        return int(numeric) if numeric.is_integer() else numeric
 
-    def _parse_key_indices(self, key: Any, expected_length: int) -> List[int]:
-        if expected_length == 0:
+    def _parse_key_indices(self, key: Any, expected_length: int) -> list[int]:
+        if expected_length == 0 and key == "":
             return []
-        parts = str(key or "").split(":")
-        indices: List[int] = []
-        for part in parts:
-            if part == "":
-                continue
-            try:
-                indices.append(int(part))
-            except Exception:
-                indices.append(0)
-        while len(indices) < expected_length:
-            indices.append(0)
-        return indices[:expected_length]
-
-    def _compact_attributes(self, attributes: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        compact = {key: value for key, value in attributes.items() if value not in (None, "")}
-        return compact or None
+        parts = str(key).split(":")
+        if len(parts) != expected_length or any(not part.isdigit() for part in parts):
+            raise RuntimeError(f"ABS returned an invalid dimension key: {key!r}.")
+        return [int(part) for part in parts]
 
     def _extract_name(self, value: Any) -> str:
         if isinstance(value, str):
@@ -718,71 +703,12 @@ class DomesticDataService:
                             return item
         return ""
 
-    def _extract_description(self, value: Any) -> str:
-        if isinstance(value, dict):
-            description = value.get("description")
-            if isinstance(description, str):
-                return description
-            descriptions = value.get("descriptions")
-            if isinstance(descriptions, dict):
-                english = descriptions.get("en")
-                if isinstance(english, str) and english:
-                    return english
-                for item in descriptions.values():
-                    if isinstance(item, str) and item:
-                        return item
-        return ""
-
-    def _to_list(self, value: Any) -> List[Any]:
+    def _to_list(self, value: Any) -> list[Any]:
         if value is None:
             return []
         return value if isinstance(value, list) else [value]
 
-    @staticmethod
-    def format_dataflow_identifier(flow: Dict[str, Any]) -> str:
-        return f"{_clean_text(flow.get('agencyID'))},{_clean_text(flow.get('id'))},{_clean_text(flow.get('version'))}"
 
-    @staticmethod
-    def parse_dataflow_identifier(identifier: str) -> Dict[str, str]:
-        candidate = _clean_text(identifier)
-        if candidate.startswith("{") and "datasetId" in candidate:
-            try:
-                parsed = json.loads(candidate)
-                if isinstance(parsed, dict) and isinstance(parsed.get("datasetId"), str):
-                    candidate = _clean_text(parsed["datasetId"])
-            except Exception:
-                pass
-        parts = [part.strip() for part in candidate.split(",") if part.strip()]
-        if not parts:
-            raise RuntimeError("Empty dataflow identifier provided.")
-        if len(parts) == 1:
-            return {"agencyId": "", "dataflowId": parts[0]}
-        if len(parts) == 2:
-            return {"agencyId": parts[0] or "ABS", "dataflowId": parts[1]}
-        return {"agencyId": parts[0] or "ABS", "dataflowId": parts[1], "version": parts[2]}
-
-    @staticmethod
-    def select_latest_flow(flows: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-        if not flows:
-            return None
-        return max(flows, key=lambda flow: DomesticDataService._version_key(_clean_text(flow.get("version"))))
-
-    @staticmethod
-    def _version_key(version: str) -> tuple[int, ...]:
-        parts = []
-        for item in str(version or "").split("."):
-            try:
-                parts.append(int(item))
-            except Exception:
-                parts.append(0)
-        return tuple(parts)
-
-
-_DOMESTIC_SERVICE: Optional[DomesticDataService] = None
-
-
+@lru_cache(maxsize=1)
 def get_domestic_service() -> DomesticDataService:
-    global _DOMESTIC_SERVICE
-    if _DOMESTIC_SERVICE is None:
-        _DOMESTIC_SERVICE = DomesticDataService()
-    return _DOMESTIC_SERVICE
+    return DomesticDataService()

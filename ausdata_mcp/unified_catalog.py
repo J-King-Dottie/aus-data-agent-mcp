@@ -1,19 +1,25 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 import sqlite3
 import time
-from functools import wraps
+from contextlib import closing
+from functools import lru_cache, wraps
 from threading import RLock
-from functools import lru_cache
+from typing import Any
 from uuid import uuid4
-from typing import Any, Dict, List, Optional
 
-
+from .catalog_refresh import (
+    SCHEMA_VERSION,
+    CatalogueUnavailableError,
+    due_sources,
+    refresh,
+    valid_entry,
+)
+from .catalog_sources import ENERGY_PROVIDER, PROVIDERS, RBA_PROVIDER
 from .runtime import RUNTIME_DIR, SESSION_ID
-from .catalog_refresh import SCHEMA_VERSION, due_sources, refresh
-from .catalog_sources import PROVIDERS
 
 CATALOG_PATH = RUNTIME_DIR / "sessions" / SESSION_ID / "catalogue" / "catalog.json"
 FTS_DB_PATH = CATALOG_PATH.with_name("search.sqlite3")
@@ -22,12 +28,41 @@ _payload = None
 _payload_path = None
 
 
+def _valid_snapshot(payload):
+    if not isinstance(payload, dict) or payload.get("schema_version") != SCHEMA_VERSION:
+        return False
+    if not isinstance(payload.get("generation"), str) or not payload["generation"]:
+        return False
+    entries, sources = payload.get("entries"), payload.get("sources")
+    if not isinstance(entries, list) or not entries or not isinstance(sources, dict):
+        return False
+    if not isinstance(payload.get("lastUpdated"), str) or set(sources) != set(PROVIDERS):
+        return False
+    if any(not valid_entry(entry) for entry in entries) or len(
+        {entry["datasetId"] for entry in entries}
+    ) != len(entries):
+        return False
+    for source in sources.values():
+        if not isinstance(source, dict) or source.get("status") not in {
+            "fresh",
+            "stale",
+            "unavailable",
+        }:
+            return False
+        expiry = source.get("refresh_after")
+        if not isinstance(expiry, (int, float)) or not math.isfinite(expiry):
+            return False
+    return True
+
+
 def _locked(function):
     @wraps(function)
     def wrapped(*args, **kwargs):
         with CATALOG_LOCK:
             return function(*args, **kwargs)
+
     return wrapped
+
 
 STOPWORDS = {
     "the",
@@ -60,12 +95,12 @@ def _clean_text(value: Any) -> str:
     return re.sub(r"\s+", " ", str(value or "").strip())
 
 
-def _normalize_tokens(query: str) -> List[str]:
+def _normalize_tokens(query: str) -> list[str]:
     raw_tokens = re.findall(r"[A-Za-z0-9]+", str(query or "").lower())
     return [token for token in raw_tokens if len(token) > 1 and token not in STOPWORDS]
 
 
-def _build_match_query(tokens: List[str], operator: str) -> str:
+def _build_match_query(tokens: list[str], operator: str) -> str:
     if not tokens:
         return ""
     return f" {operator} ".join(f'"{token}"*' for token in tokens)
@@ -82,7 +117,7 @@ def _invalidate_caches() -> None:
     _catalog_entries_by_id.cache_clear()
 
 
-def build_catalog_index(entries: List[Dict[str, Any]], generation: str = "") -> None:
+def build_catalog_index(entries: list[dict[str, Any]], generation: str = "") -> None:
     FTS_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     temporary = FTS_DB_PATH.with_name(f".{FTS_DB_PATH.name}.{uuid4().hex}.tmp")
     conn = sqlite3.connect(temporary)
@@ -152,21 +187,25 @@ def build_catalog_index(entries: List[Dict[str, Any]], generation: str = "") -> 
         temporary.unlink(missing_ok=True)
 
 
-
 @_locked
-def ensure_unified_catalog_artifacts(force_refresh: bool = False) -> Dict[str, Any]:
+def ensure_unified_catalog_artifacts(force_refresh: bool = False) -> dict[str, Any]:
     global _payload, _payload_path
     if _payload is None or _payload_path != CATALOG_PATH:
+        _invalidate_caches()
         try:
             previous = json.loads(CATALOG_PATH.read_text(encoding="utf-8"))
-            if previous.get("schema_version") != SCHEMA_VERSION or not isinstance(previous.get("entries"), list):
+            if not _valid_snapshot(previous):
                 previous = {}
         except (OSError, ValueError, AttributeError):
             previous = {}
         _payload, _payload_path = previous, CATALOG_PATH
     if due_sources(_payload, force_refresh):
         started = time.perf_counter()
-        updated = refresh(_payload, force=force_refresh)
+        try:
+            updated = refresh(_payload, force=force_refresh)
+        except CatalogueUnavailableError as exc:
+            _payload = exc.payload
+            raise
         indexing = time.perf_counter()
         build_catalog_index(updated["entries"], updated["generation"])
         updated["index_seconds"] = round(time.perf_counter() - indexing, 3)
@@ -179,10 +218,14 @@ def ensure_unified_catalog_artifacts(force_refresh: bool = False) -> Dict[str, A
             temporary.unlink(missing_ok=True)
         _invalidate_caches()
         _payload, _payload_path = updated, CATALOG_PATH
+    if not _payload.get("entries"):
+        raise CatalogueUnavailableError(_payload)
     # A crash between the two atomic file replacements, a missing index, or an
     # interrupted copy must never pair one catalogue with another generation's FTS.
     try:
-        with sqlite3.connect(f"file:{FTS_DB_PATH}?mode=ro", uri=True) as conn:
+        with closing(
+            sqlite3.connect(FTS_DB_PATH.resolve().as_uri() + "?mode=ro", uri=True)
+        ) as conn:
             generation = conn.execute("SELECT id FROM generation").fetchone()[0]
     except (sqlite3.Error, TypeError):
         generation = None
@@ -192,23 +235,24 @@ def ensure_unified_catalog_artifacts(force_refresh: bool = False) -> Dict[str, A
 
 
 @lru_cache(maxsize=1)
-def _catalog_entries_by_id() -> Dict[str, Dict[str, Any]]:
+def _catalog_entries_by_id() -> dict[str, dict[str, Any]]:
     entries = ensure_unified_catalog_artifacts(False)["entries"]
     return {entry["datasetId"]: entry for entry in entries}
 
 
 @_locked
-def get_unified_catalog_entry(dataset_id: str) -> Optional[Dict[str, Any]]:
+def get_unified_catalog_entry(dataset_id: str) -> dict[str, Any] | None:
     ensure_unified_catalog_artifacts(False)
     return _catalog_entries_by_id().get(_clean_text(dataset_id))
 
 
-def _row_to_entry(row: sqlite3.Row) -> Dict[str, Any]:
+def _row_to_entry(row: sqlite3.Row) -> dict[str, Any]:
     return {
         "datasetId": row["dataset_id"],
         "provider": row["provider"],
         "title": row["title"],
         "description": str(row["description"] or "")[:500],
+        "description_truncated": len(str(row["description"] or "")) > 500,
         "sourceUrl": row["source_url"],
         "requiresMetadataBeforeRetrieval": bool(row["requires_metadata_before_retrieval"]),
     }
@@ -229,7 +273,9 @@ def _matching_count(connection: sqlite3.Connection, match_query: str, provider: 
     ).fetchone()[0]
 
 
-def _matching_rows(connection: sqlite3.Connection, match_query: str, provider: str, limit: int, offset: int) -> List[sqlite3.Row]:
+def _matching_rows(
+    connection: sqlite3.Connection, match_query: str, provider: str, limit: int, offset: int
+) -> list[sqlite3.Row]:
     if not match_query:
         return connection.execute(
             """
@@ -261,21 +307,34 @@ def _matching_rows(connection: sqlite3.Connection, match_query: str, provider: s
 
 
 @_locked
-def search_unified_catalog(query: str, limit: int = 50, *, offset: int = 0, force_refresh: bool = False, provider: str = "") -> Dict[str, Any]:
-    payload = ensure_unified_catalog_artifacts(force_refresh)
-    aliases = {"rba": PROVIDERS[5], "dcceew": PROVIDERS[6], "worldbank": "World Bank", "comtrade": "UN Comtrade",
-               **{alias: "Pacific Data Hub" for alias in ("pdh", "spc", "pacific", "pdh.stat")},
-               **{name.lower(): name for name in PROVIDERS}}
+def search_unified_catalog(
+    query: str, limit: int = 50, *, offset: int = 0, force_refresh: bool = False, provider: str = ""
+) -> dict[str, Any]:
+    aliases = {
+        "rba": RBA_PROVIDER,
+        "dcceew": ENERGY_PROVIDER,
+        "worldbank": "World Bank",
+        "comtrade": "UN Comtrade",
+        **{alias: "Pacific Data Hub" for alias in ("pdh", "spc", "pacific", "pdh.stat")},
+        **{name.lower(): name for name in PROVIDERS},
+    }
     provider = aliases.get(provider.strip().lower(), provider.strip())
     if provider and provider not in PROVIDERS:
         raise ValueError("Unknown provider. Use: " + ", ".join(PROVIDERS))
+    if not 1 <= limit <= 50 or offset < 0:
+        raise ValueError("limit must be 1-50 and offset must be non-negative.")
+    payload = ensure_unified_catalog_artifacts(force_refresh)
     if provider and payload["sources"][provider]["status"] == "unavailable":
-        raise RuntimeError(f"{provider} catalogue unavailable: {payload['sources'][provider]['error']}")
-    warnings = [f"{name}: {status['status']} catalogue; {status['error']}"
-                for name, status in payload["sources"].items() if status["status"] != "fresh" and (not provider or name == provider)]
+        raise RuntimeError(
+            f"{provider} catalogue unavailable: {payload['sources'][provider]['error']}"
+        )
+    warnings = [
+        f"{name}: {status['status']} catalogue; {status['error']}"
+        for name, status in payload["sources"].items()
+        if status["status"] != "fresh" and (not provider or name == provider)
+    ]
     clean_query = _clean_text(query)
-    clean_limit = max(1, min(int(limit or 50), 50))
-    clean_offset = max(0, int(offset))
+    clean_limit, clean_offset = limit, offset
     connection = sqlite3.connect(FTS_DB_PATH)
     connection.row_factory = sqlite3.Row
     try:
@@ -289,15 +348,24 @@ def search_unified_catalog(query: str, limit: int = 50, *, offset: int = 0, forc
             "returned_count": len(entries),
             "limit": clean_limit,
             "offset": clean_offset,
-            "next_offset": clean_offset + len(entries) if clean_offset + len(entries) < matching_count else None,
+            "next_offset": clean_offset + len(entries)
+            if clean_offset + len(entries) < matching_count
+            else None,
             "provider": provider or None,
             "ordering": "FTS text-match order; no dataset suitability score",
             "candidates": entries,
-            "catalogue": {"entry_count": len(payload["entries"]), "generation": payload["generation"],
-                          "last_updated": payload["lastUpdated"], "sources": payload["sources"],
-                          "complete": all(status["status"] == "fresh" for status in payload["sources"].values()),
-                          "refresh_seconds": payload.get("refresh_seconds"),
-                          "cache_scope": "session", "path": str(CATALOG_PATH)},
+            "catalogue": {
+                "entry_count": len(payload["entries"]),
+                "generation": payload["generation"],
+                "last_updated": payload["lastUpdated"],
+                "sources": payload["sources"],
+                "complete": all(
+                    status["status"] == "fresh" for status in payload["sources"].values()
+                ),
+                "refresh_seconds": payload.get("refresh_seconds"),
+                "cache_scope": "session",
+                "path": str(CATALOG_PATH),
+            },
             "warnings": warnings,
         }
     finally:

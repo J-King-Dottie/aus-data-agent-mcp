@@ -1,15 +1,15 @@
 """Live discovery adapters for the supported source catalogues and publications."""
+
 from __future__ import annotations
 
 import html
 import re
+from html.parser import HTMLParser
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any
+from urllib.parse import unquote, urljoin, urlparse
 
 import httpx
-from html.parser import HTMLParser
-from urllib.parse import urljoin, urlparse, unquote
-
 
 from .data_config import get_data_settings
 from .domestic_data import get_domestic_service
@@ -18,17 +18,28 @@ WORLD_BANK_PROVIDER = "World Bank"
 IMF_PROVIDER = "IMF"
 OECD_PROVIDER = "OECD"
 COMTRADE_PROVIDER = "UN Comtrade"
+RBA_PROVIDER = "Reserve Bank of Australia"
+ENERGY_PROVIDER = "Department of Climate Change, Energy, the Environment and Water"
 
 RBA_PAGE = "https://www.rba.gov.au/statistics/tables/"
 ENERGY_PAGE = "https://www.energy.gov.au/energy-data/australian-energy-statistics"
 COMTRADE_FLOWS = "https://comtradeapi.un.org/files/v1/app/reference/tradeRegimes.json"
 OECD_SEARCH = "https://dotstat-search.oecd.org/api/search"
-PROVIDERS = ("ABS", "World Bank", "IMF", "OECD", "Pacific Data Hub",
-             "Reserve Bank of Australia", "Department of Climate Change, Energy, the Environment and Water", "UN Comtrade")
+PROVIDERS = (
+    "ABS",
+    "World Bank",
+    "IMF",
+    "OECD",
+    "Pacific Data Hub",
+    RBA_PROVIDER,
+    ENERGY_PROVIDER,
+    "UN Comtrade",
+)
 
 
 class Links(HTMLParser):
     """Read publication links and their labels without downloading data files."""
+
     def __init__(self, html):
         super().__init__(convert_charrefs=True)
         self.links = []
@@ -56,14 +67,26 @@ def _page(client, url):
 
 
 def _custom_entry(flow):
-    return {"route": "domestic", "provider": flow["sourceOrganization"],
-            "datasetId": f"CUSTOM_AUS,{flow['id']},1.0", "title": flow["name"],
-            "description": flow["description"], "searchText": _join_search_text([
-                flow["id"], flow["name"], flow["description"],
-                flow["sourceOrganization"], str((flow.get("curation") or {}).get("tableCode") or ""),
-            ]),
-            "sourceUrl": flow["sourcePageUrl"], "requiresMetadataBeforeRetrieval": True,
-            "providerConfig": {}, "sourceRecord": flow}
+    return {
+        "route": "domestic",
+        "provider": flow["sourceOrganization"],
+        "datasetId": f"CUSTOM_AUS,{flow['id']},1.0",
+        "title": flow["name"],
+        "description": flow["description"],
+        "searchText": _join_search_text(
+            [
+                flow["id"],
+                flow["name"],
+                flow["description"],
+                flow["sourceOrganization"],
+                str((flow.get("curation") or {}).get("tableCode") or ""),
+            ]
+        ),
+        "sourceUrl": flow["sourcePageUrl"],
+        "requiresMetadataBeforeRetrieval": True,
+        "providerConfig": {},
+        "sourceRecord": flow,
+    }
 
 
 def fetch_rba_catalog(client):
@@ -86,10 +109,19 @@ def fetch_rba_catalog(client):
         name = title or label or code
         if match[2]:
             name += " — " + label
-        flow = {"id": "RBA_" + code.replace(".", "_") + suffix, "agencyID": "CUSTOM_AUS", "version": "1.0",
-                "name": name, "description": f"Reserve Bank of Australia statistical table {code}: {name}. Live time-series CSV; inspect metadata for individual series.",
-                "flowType": "rba_tables_csv", "sourceType": "csv", "sourceOrganization": PROVIDERS[5],
-                "sourcePageUrl": RBA_PAGE, "sourceUrl": url, "curation": {"tableCode": code}}
+        flow = {
+            "id": "RBA_" + code.replace(".", "_") + suffix,
+            "agencyID": "CUSTOM_AUS",
+            "version": "1.0",
+            "name": name,
+            "description": f"Reserve Bank of Australia statistical table {code}: {name}. Live time-series CSV; inspect metadata for individual series.",
+            "flowType": "rba_tables_csv",
+            "sourceType": "csv",
+            "sourceOrganization": RBA_PROVIDER,
+            "sourcePageUrl": RBA_PAGE,
+            "sourceUrl": url,
+            "curation": {"tableCode": code},
+        }
         entries.append(_custom_entry(flow))
     return entries
 
@@ -98,26 +130,47 @@ def fetch_energy_catalog(client):
     publications = []
     for href, label in Links(_page(client, ENERGY_PAGE)).links:
         url = urljoin(ENERGY_PAGE, href)
-        if urlparse(url).netloc == "www.energy.gov.au" and "statistics-table-o-electricity-generation" in url:
+        if (
+            urlparse(url).netloc == "www.energy.gov.au"
+            and "statistics-table-o-electricity-generation" in url
+        ):
             years = re.findall(r"20\d{2}", url)
             if years:
                 publications.append((max(map(int, years)), url, label))
     if not publications:
-        raise RuntimeError("DCCEEW no longer lists an AES Table O publication at its statistics index.")
+        raise RuntimeError(
+            "DCCEEW no longer lists an AES Table O publication at its statistics index."
+        )
     _, publication, label = max(publications)
     downloads = []
     for href, text in Links(_page(client, publication)).links:
         url = urljoin(publication, href)
         decoded = unquote(url).lower()
-        if urlparse(url).netloc == "www.energy.gov.au" and urlparse(url).path.lower().endswith(".xlsx") and re.search(r"table[ _-]*o", decoded + " " + text.lower()):
+        if (
+            urlparse(url).netloc == "www.energy.gov.au"
+            and urlparse(url).path.lower().endswith(".xlsx")
+            and re.search(r"table[ _-]*o", decoded + " " + text.lower())
+        ):
             downloads.append(url)
     downloads = list(dict.fromkeys(downloads))
     if len(downloads) != 1:
-        raise RuntimeError(f"Expected one current AES Table O workbook, found {len(downloads)}; publication layout may have changed.")
-    flow = {"id": "AES_TABLE_O", "agencyID": "CUSTOM_AUS", "version": "1.0", "name": label,
-            "description": label + ". Electricity generation by fuel, state, financial year and calendar year. Inspect workbook metadata for available periods and sheets.",
-            "flowType": "dcceew_aes_xlsx", "sourceType": "xlsx", "sourceOrganization": PROVIDERS[6],
-            "sourcePageUrl": publication, "sourceUrl": downloads[0], "curation": {"discoverSheets": True}}
+        raise RuntimeError(
+            f"Expected one current AES Table O workbook, found {len(downloads)}; publication layout may have changed."
+        )
+    flow = {
+        "id": "AES_TABLE_O",
+        "agencyID": "CUSTOM_AUS",
+        "version": "1.0",
+        "name": label,
+        "description": label
+        + ". Electricity generation by fuel, state, financial year and calendar year. Inspect workbook metadata for available periods and sheets.",
+        "flowType": "dcceew_aes_xlsx",
+        "sourceType": "xlsx",
+        "sourceOrganization": ENERGY_PROVIDER,
+        "sourcePageUrl": publication,
+        "sourceUrl": downloads[0],
+        "curation": {"discoverSheets": True},
+    }
     return [_custom_entry(flow)]
 
 
@@ -125,13 +178,30 @@ def _normalize_macro(items):
     entries = []
     for item in dedupe_entries(items):
         config = item["provider_config"]
-        entries.append({"route": "macro", "provider": item["provider_name"], "datasetId": item["entry_id"],
-                        "title": item["indicator_label"], "description": item["description"],
-                        "searchText": item["search_text"], "sourceUrl": config.get("source_url_template", ""),
-                        "requiresMetadataBeforeRetrieval": True,
-                        **{camel: item[snake] for camel, snake in (("providerKey", "provider_key"), ("providerName", "provider_name"),
-                            ("conceptId", "concept_id"), ("conceptLabel", "concept_label"), ("indicatorLabel", "indicator_label"),
-                            ("unit", "unit"), ("providerConfig", "provider_config"))}})
+        entries.append(
+            {
+                "route": "macro",
+                "provider": item["provider_name"],
+                "datasetId": item["entry_id"],
+                "title": item["indicator_label"],
+                "description": item["description"],
+                "searchText": item["search_text"],
+                "sourceUrl": config.get("source_url_template", ""),
+                "requiresMetadataBeforeRetrieval": True,
+                **{
+                    camel: item[snake]
+                    for camel, snake in (
+                        ("providerKey", "provider_key"),
+                        ("providerName", "provider_name"),
+                        ("conceptId", "concept_id"),
+                        ("conceptLabel", "concept_label"),
+                        ("indicatorLabel", "indicator_label"),
+                        ("unit", "unit"),
+                        ("providerConfig", "provider_config"),
+                    )
+                },
+            }
+        )
     return entries
 
 
@@ -141,15 +211,22 @@ def fetch_source(provider):
         entries = _build_abs_entries()
     elif provider == "Pacific Data Hub":
         from .pacific_data import get_pacific_service
+
         entries = get_pacific_service().catalogue()
     else:
-        with httpx.Client(follow_redirects=True, headers={"User-Agent": "AusData-MCP/0.1"}) as client:
+        with httpx.Client(
+            follow_redirects=True, headers={"User-Agent": "AusData-MCP/0.1"}
+        ) as client:
             if provider in {"World Bank", "IMF", "OECD"}:
-                fetch = {"World Bank": fetch_world_bank_catalog, "IMF": fetch_imf_catalog, "OECD": fetch_oecd_catalog}[provider]
+                fetch = {
+                    "World Bank": fetch_world_bank_catalog,
+                    "IMF": fetch_imf_catalog,
+                    "OECD": fetch_oecd_catalog,
+                }[provider]
                 entries = _normalize_macro(fetch(client))
-            elif provider == PROVIDERS[5]:
+            elif provider == RBA_PROVIDER:
                 entries = fetch_rba_catalog(client)
-            elif provider == PROVIDERS[6]:
+            elif provider == ENERGY_PROVIDER:
                 entries = fetch_energy_catalog(client)
             elif provider == "UN Comtrade":
                 # Comtrade is one queryable trade cube, not thousands of datasets.
@@ -161,7 +238,9 @@ def fetch_source(provider):
                     raise RuntimeError("Comtrade no longer lists supported import/export flows.")
                 entries = _normalize_macro(build_comtrade_catalog())
                 entries[0]["catalogueSourceUrl"] = COMTRADE_FLOWS
-                entries[0]["discoveryScope"] = "One supported goods-trade cube; live import/export capability check. Commodity and country metadata is separate."
+                entries[0]["discoveryScope"] = (
+                    "One supported goods-trade cube; live import/export capability check. Commodity and country metadata is separate."
+                )
             else:
                 raise ValueError(f"Unsupported catalogue provider: {provider}")
     if not entries:
@@ -175,8 +254,8 @@ def _clean_text(value: Any) -> str:
     return text
 
 
-def _join_search_text(parts: List[str]) -> str:
-    deduped: List[str] = []
+def _join_search_text(parts: list[str]) -> str:
+    deduped: list[str] = []
     for part in parts:
         clean = _clean_text(part)
         if clean and clean not in deduped:
@@ -184,7 +263,7 @@ def _join_search_text(parts: List[str]) -> str:
     return " ".join(deduped)
 
 
-def fetch_world_bank_catalog(client: httpx.Client) -> List[Dict[str, Any]]:
+def fetch_world_bank_catalog(client: httpx.Client) -> list[dict[str, Any]]:
     first = client.get(
         get_data_settings().worldbank_base_url.rstrip("/") + "/indicator",
         params={"format": "json", "per_page": 20000, "page": 1},
@@ -207,14 +286,16 @@ def fetch_world_bank_catalog(client: httpx.Client) -> List[Dict[str, Any]]:
         )
         response.raise_for_status()
         page_payload = response.json()
-        page_rows = page_payload[1] if isinstance(page_payload, list) and len(page_payload) > 1 else []
+        page_rows = (
+            page_payload[1] if isinstance(page_payload, list) and len(page_payload) > 1 else []
+        )
         if not isinstance(page_rows, list) or not page_rows:
             raise RuntimeError(f"World Bank indicator page {page} was empty or invalid.")
         all_rows.extend(page_rows)
 
     if meta.get("total") is not None and len(all_rows) != int(meta["total"]):
         raise RuntimeError("World Bank catalogue pagination was incomplete.")
-    entries: List[Dict[str, Any]] = []
+    entries: list[dict[str, Any]] = []
     for row in all_rows:
         if not isinstance(row, dict):
             continue
@@ -233,7 +314,9 @@ def fetch_world_bank_catalog(client: httpx.Client) -> List[Dict[str, Any]]:
                 topic_label = _clean_text(topic.get("value"))
                 if topic_label:
                     topics.append(topic_label)
-        description = _clean_text(" ".join(part for part in [label, source_note, source_org] if part))
+        description = _clean_text(
+            " ".join(part for part in [label, source_note, source_org] if part)
+        )
         search_text = _join_search_text(
             [
                 indicator_id,
@@ -249,7 +332,9 @@ def fetch_world_bank_catalog(client: httpx.Client) -> List[Dict[str, Any]]:
         source_url = f"https://data.worldbank.org/indicator/{indicator_id}"
         entries.append(
             {
-                "entry_id": f"worldbank::{indicator_id}" if source_id == "2" else f"worldbank::{source_id}::{indicator_id}",
+                "entry_id": f"worldbank::{indicator_id}"
+                if source_id == "2"
+                else f"worldbank::{source_id}::{indicator_id}",
                 "provider_key": "worldbank",
                 "provider_name": WORLD_BANK_PROVIDER,
                 "concept_id": indicator_id,
@@ -270,7 +355,7 @@ def fetch_world_bank_catalog(client: httpx.Client) -> List[Dict[str, Any]]:
     return entries
 
 
-def fetch_imf_catalog(client: httpx.Client) -> List[Dict[str, Any]]:
+def fetch_imf_catalog(client: httpx.Client) -> list[dict[str, Any]]:
     response = client.get(get_data_settings().imf_base_url.rstrip("/") + "/indicators", timeout=120)
     response.raise_for_status()
     payload = response.json()
@@ -278,7 +363,7 @@ def fetch_imf_catalog(client: httpx.Client) -> List[Dict[str, Any]]:
     if not isinstance(indicators, dict):
         return []
 
-    entries: List[Dict[str, Any]] = []
+    entries: list[dict[str, Any]] = []
     for series_id, item in indicators.items():
         if not isinstance(item, dict):
             continue
@@ -304,7 +389,10 @@ def fetch_imf_catalog(client: httpx.Client) -> List[Dict[str, Any]]:
                 "concept_label": label,
                 "indicator_label": label,
                 "unit": unit,
-                "description": _clean_text(" ".join(part for part in [label, description, source, unit] if part)) or label,
+                "description": _clean_text(
+                    " ".join(part for part in [label, description, source, unit] if part)
+                )
+                or label,
                 "search_text": _join_search_text(
                     [
                         clean_series_id,
@@ -328,19 +416,26 @@ def fetch_imf_catalog(client: httpx.Client) -> List[Dict[str, Any]]:
     return entries
 
 
-def fetch_oecd_catalog(client: httpx.Client) -> List[Dict[str, Any]]:
+def fetch_oecd_catalog(client: httpx.Client) -> list[dict[str, Any]]:
     # OECD Data Explorer uses this public search index for dataset discovery.
     # Its SDMX dataflow endpoint can challenge server-side requests, while the
     # detailed structures and observations remain separate SDMX operations.
     flows = []
     total = None
     while total is None or len(flows) < total:
-        response = client.get(OECD_SEARCH, params={"tenant": "oecd", "rows": 1500, "start": len(flows)}, timeout=120)
+        response = client.get(
+            OECD_SEARCH, params={"tenant": "oecd", "rows": 1500, "start": len(flows)}, timeout=120
+        )
         response.raise_for_status()
         payload = response.json()
         page = payload.get("dataflows")
         found = payload.get("numFound")
-        if not isinstance(page, list) or not isinstance(found, int) or found < 1 or payload.get("start") != len(flows):
+        if (
+            not isinstance(page, list)
+            or not isinstance(found, int)
+            or found < 1
+            or payload.get("start") != len(flows)
+        ):
             raise RuntimeError("OECD search returned an invalid catalogue page.")
         if total is not None and found != total:
             raise RuntimeError("OECD catalogue changed during pagination; retry the refresh.")
@@ -349,7 +444,7 @@ def fetch_oecd_catalog(client: httpx.Client) -> List[Dict[str, Any]]:
             raise RuntimeError("OECD search returned an incomplete catalogue page.")
         flows.extend(page)
 
-    entries: List[Dict[str, Any]] = []
+    entries: list[dict[str, Any]] = []
     for flow in flows:
         if flow.get("datasourceId") != "dsDisseminateFinalDMZ":
             continue
@@ -358,8 +453,12 @@ def fetch_oecd_catalog(client: httpx.Client) -> List[Dict[str, Any]]:
         version = _clean_text(flow.get("version"))
         if not (agency_id.startswith("OECD") and dataflow_id and version):
             raise RuntimeError("OECD search returned a public dataflow without its SDMX identity.")
-        label = _clean_text(html.unescape(re.sub(r"<[^>]*>", " ", str(flow.get("name") or dataflow_id))))
-        description = _clean_text(html.unescape(re.sub(r"<[^>]*>", " ", str(flow.get("description") or label))))[:4000]
+        label = _clean_text(
+            html.unescape(re.sub(r"<[^>]*>", " ", str(flow.get("name") or dataflow_id)))
+        )
+        description = _clean_text(
+            html.unescape(re.sub(r"<[^>]*>", " ", str(flow.get("description") or label)))
+        )[:4000]
         source_url = f"{get_data_settings().oecd_base_url.rstrip('/')}/data/{agency_id},{dataflow_id},{version}"
         entries.append(
             {
@@ -392,7 +491,7 @@ def fetch_oecd_catalog(client: httpx.Client) -> List[Dict[str, Any]]:
     return entries
 
 
-def build_comtrade_catalog() -> List[Dict[str, Any]]:
+def build_comtrade_catalog() -> list[dict[str, Any]]:
     label = "UN Comtrade goods trade (imports and exports by partner and HS code)"
     description = (
         "UN Comtrade goods trade retrieval for imports and exports, bilateral trade, world totals, "
@@ -439,8 +538,8 @@ def build_comtrade_catalog() -> List[Dict[str, Any]]:
     ]
 
 
-def dedupe_entries(entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    deduped: Dict[str, Dict[str, Any]] = {}
+def dedupe_entries(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    deduped: dict[str, dict[str, Any]] = {}
     for entry in entries:
         entry_id = _clean_text(entry.get("entry_id"))
         if not entry_id:
@@ -452,13 +551,13 @@ def dedupe_entries(entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         existing["search_text"] = _join_search_text(
             [existing.get("search_text", ""), entry.get("search_text", "")]
         )
-        if len(_clean_text(entry.get("description"))) > len(_clean_text(existing.get("description"))):
+        if len(_clean_text(entry.get("description"))) > len(
+            _clean_text(existing.get("description"))
+        ):
             existing["description"] = entry["description"]
         if not _clean_text(existing.get("unit")) and _clean_text(entry.get("unit")):
             existing["unit"] = entry["unit"]
     return list(deduped.values())
-
-
 
 
 def _abs_source_url(agency_id: str, flow_id: str, version: str) -> str:
@@ -467,12 +566,12 @@ def _abs_source_url(agency_id: str, flow_id: str, version: str) -> str:
     clean_version = _clean_text(version)
     if not clean_agency or not clean_flow or not clean_version:
         return ""
-    return f"https://data.api.abs.gov.au/rest/dataflow/{clean_agency}/{clean_flow}/{clean_version}"
+    return f"{get_data_settings().abs_api_base.rstrip('/')}/rest/dataflow/{clean_agency}/{clean_flow}/{clean_version}"
 
 
-def _build_abs_entries() -> List[Dict[str, Any]]:
-    entries: List[Dict[str, Any]] = []
-    for flow in get_domestic_service().get_abs_data_flows(force_refresh=True):
+def _build_abs_entries() -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+    for flow in get_domestic_service().get_abs_data_flows():
         flow_id = _clean_text(flow.get("id"))
         agency_id = _clean_text(flow.get("agencyID")) or "ABS"
         version = _clean_text(flow.get("version"))

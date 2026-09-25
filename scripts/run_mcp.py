@@ -1,6 +1,7 @@
 """Launch from any working directory using an absolute path to this file."""
-from pathlib import Path
+
 import sys
+from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 

@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any
 from urllib.request import urlopen
-
+from uuid import uuid4
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 OUTPUT_PATH = PROJECT_ROOT / "COMTRADE_METADATA.json"
@@ -16,7 +17,7 @@ SOURCE_URLS = {
 }
 
 
-def _fetch_json(url: str) -> Dict[str, Any]:
+def _fetch_json(url: str) -> dict[str, Any]:
     with urlopen(url, timeout=120) as response:
         return json.loads(response.read().decode("utf-8-sig"))
 
@@ -25,18 +26,19 @@ def _clean_text(value: Any) -> str:
     return " ".join(str(value or "").replace("\xa0", " ").split()).strip()
 
 
-def _normalize_area_codes(items: List[Dict[str, Any]], *, code_key: str, name_key: str) -> List[Dict[str, Any]]:
-    normalized: List[Dict[str, Any]] = []
+def _normalize_area_codes(
+    items: list[dict[str, Any]], *, code_key: str, name_key: str
+) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
     for item in items:
         if not isinstance(item, dict):
             continue
         code = str(item.get(code_key) or item.get("id") or "").strip()
         label = _clean_text(item.get(name_key) or item.get("text") or "")
-        if not code or not label:
+        if not code or code == "0" or not label:
             continue
         normalized.append({"code": code, "label": label})
-    normalized.append({"code": "0", "label": "All partners (World total)"})
-    deduped: Dict[str, Dict[str, Any]] = {}
+    deduped: dict[str, dict[str, Any]] = {}
     for item in normalized:
         deduped[str(item["code"])] = item
     normalized = list(deduped.values())
@@ -44,8 +46,8 @@ def _normalize_area_codes(items: List[Dict[str, Any]], *, code_key: str, name_ke
     return normalized
 
 
-def _normalize_hs_codes(items: List[Dict[str, Any]], level: int) -> List[Dict[str, Any]]:
-    normalized: List[Dict[str, Any]] = []
+def _normalize_hs_codes(items: list[dict[str, Any]], level: int) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
     for item in items:
         if not isinstance(item, dict):
             continue
@@ -63,12 +65,22 @@ def _normalize_hs_codes(items: List[Dict[str, Any]], level: int) -> List[Dict[st
             entry["parent"] = str(item.get("parent") or "").strip()
         normalized.append(entry)
     normalized.append({"code": "TOTAL", "label": "TOTAL - All products"})
-    deduped: Dict[str, Dict[str, Any]] = {}
+    deduped: dict[str, dict[str, Any]] = {}
     for item in normalized:
         deduped[str(item["code"])] = item
     normalized = list(deduped.values())
     normalized.sort(key=lambda item: item["code"])
     return normalized
+
+
+def validate_metadata(payload: dict) -> None:
+    if {item["code"] for item in payload["flows"]} != {"M", "X"}:
+        raise ValueError("Comtrade reference response did not contain import and export flows.")
+    if not payload["countries"]:
+        raise ValueError("Comtrade reference response contained no reporters.")
+    for dimension in ("hs_2digit", "hs_4digit"):
+        if not any(item["code"] != "TOTAL" for item in payload[dimension]):
+            raise ValueError(f"Comtrade reference response contained no {dimension} product codes.")
 
 
 def main() -> None:
@@ -100,7 +112,19 @@ def main() -> None:
         ),
     }
 
-    OUTPUT_PATH.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    validate_metadata(payload)
+    payload["provenance"] = {
+        "retrieved_at": datetime.now(UTC).isoformat(),
+        "source_urls": SOURCE_URLS,
+    }
+    temporary = OUTPUT_PATH.with_name(f".{OUTPUT_PATH.name}.{uuid4().hex}.tmp")
+    try:
+        temporary.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
+        temporary.replace(OUTPUT_PATH)
+    finally:
+        temporary.unlink(missing_ok=True)
     counts = {key: len(value) for key, value in payload.items() if isinstance(value, list)}
     print(json.dumps({"output": str(OUTPUT_PATH), "counts": counts}, ensure_ascii=False))
 

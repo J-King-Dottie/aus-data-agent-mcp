@@ -8,7 +8,8 @@ Canonical entrypoints:
 - AGENT_SYSTEM_PROMPT.md: analyst guidance supplied during MCP initialization
 - AGENTS.md: development rules and architecture
 - .mcp.json: project stdio configuration
-- ausdata_mcp/server.py: tool contracts
+- ausdata_mcp/server.py: tool contracts and concurrent dispatch
+- ausdata_mcp/artifacts.py: complete evidence storage and bounded manifests
 
 Workflow: search_catalog -> select candidate -> get_metadata -> retrieve -> agent reads the complete JSON at artifact_path, filters and analyses it with its own code.
 Prefer in-conversation charts and answers. The retrieval JSON is working evidence; do not create extra PNG, CSV, Excel or report files by default unless the user requests an export or the harness needs a temporary display file.
@@ -16,3 +17,5 @@ If no suitable dataset is retrievable through this MCP, report that limit and as
 The retrieve manifest is a bounded summary, not the full evidence. The agent must have access to the MCP server's artifact_path; there are no post-retrieval MCP tools.
 For Pacific data, search with provider PDH; get_metadata with dimension browses codelists, and retrieve.sourceFilters selects source codes. Preserve unit multipliers, observation status and publication annotations from the saved JSON. Every source feeds one normalized live catalogue and FTS index, cached per session for 24 hours. Search reports stale/unavailable sources; dataset metadata remains a separate step.
 The calling agent chooses calculations, charts, files and response format. No web app or model API key is needed.
+
+Unsupported source parameters and missing requested series fail explicitly. RBA dates use ISO codes; DCCEEW requires a metadata-selected sheet group or sheet. Filter custom-source periods in the saved JSON. Macro source_row fields retain raw publisher observations. Comtrade fixes secondary-partner, customs and transport dimensions to totals; get_metadata discloses this scope. See README for configuration, offline checks and opt-in live smoke commands.

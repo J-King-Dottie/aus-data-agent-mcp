@@ -1,33 +1,30 @@
-#!/usr/bin/env python3
+"""Parse the official source file into metadata and observation records."""
 
-import argparse
 import csv
-import json
+import io
+import math
 import re
-from pathlib import Path
-
+from datetime import datetime
 
 DATE_VALUE_RE = re.compile(r"^\d{1,2}[-/][A-Za-z0-9]{1,3}[-/]\d{2,4}$")
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="RBA statistical tables CSV parser")
-    parser.add_argument("command", choices=["metadata", "resolve"])
-    parser.add_argument("--csv", required=True)
-    parser.add_argument("--dataset-id", required=True)
-    parser.add_argument("--agency-id", required=True)
-    parser.add_argument("--version", required=True)
-    parser.add_argument("--name", required=True)
-    parser.add_argument("--description", required=True)
-    parser.add_argument("--curation-json", required=True)
-    parser.add_argument("--data-key")
-    parser.add_argument("--detail", default="full")
-    return parser.parse_args()
-
-
-def normalize_code(value: str) -> str:
-    code = re.sub(r"[^A-Za-z0-9]+", "_", str(value or "").strip().upper()).strip("_")
-    return code or "UNKNOWN"
+def parse_period(value: str) -> str:
+    for pattern in (
+        "%d-%b-%Y",
+        "%d/%b/%Y",
+        "%d/%m/%Y",
+        "%d-%m-%Y",
+        "%d-%b-%y",
+        "%d/%b/%y",
+        "%d/%m/%y",
+        "%d-%m-%y",
+    ):
+        try:
+            return datetime.strptime(value, pattern).date().isoformat()
+        except ValueError:
+            continue
+    raise ValueError(f"Unrecognized RBA observation date: {value!r}.")
 
 
 def parse_float(value: str):
@@ -35,7 +32,8 @@ def parse_float(value: str):
     if not text:
         return None
     try:
-        return float(text)
+        number = float(text)
+        return number if math.isfinite(number) else None
     except ValueError:
         return None
 
@@ -51,9 +49,8 @@ def is_date_like(value: str) -> bool:
     return bool(DATE_VALUE_RE.match(str(value or "").strip()))
 
 
-def load_rows(csv_path: Path) -> list[list[str]]:
-    with csv_path.open("r", encoding="utf-8-sig", newline="") as handle:
-        return [list(row) for row in csv.reader(handle)]
+def load_rows(content: bytes) -> list[list[str]]:
+    return list(csv.reader(io.StringIO(content.decode("utf-8-sig"))))
 
 
 def parse_table(rows: list[list[str]]) -> dict:
@@ -75,12 +72,25 @@ def parse_table(rows: list[list[str]]) -> dict:
             metadata_rows["Series ID"] = value_cells
             data_start_idx = idx + 1
             break
-        if first_cell in {"Title", "Description", "Frequency", "Type", "Units", "Source", "Publication date"}:
+        if first_cell in {
+            "Title",
+            "Description",
+            "Frequency",
+            "Type",
+            "Units",
+            "Source",
+            "Publication date",
+        }:
             metadata_rows[first_cell] = value_cells
             if first_cell == "Source":
                 source_row_seen = True
             continue
-        if not first_cell and source_row_seen and has_values and "Publication date" not in metadata_rows:
+        if (
+            not first_cell
+            and source_row_seen
+            and has_values
+            and "Publication date" not in metadata_rows
+        ):
             non_blank = [item for item in value_cells if item]
             if non_blank and all(is_date_like(item) for item in non_blank):
                 metadata_rows["Publication date"] = value_cells
@@ -93,31 +103,56 @@ def parse_table(rows: list[list[str]]) -> dict:
         raise ValueError("RBA CSV did not expose a Series ID row")
 
     series_ids = [clean_text(item) for item in metadata_rows.get("Series ID", [])]
-    series_count = max(
-        len(metadata_rows.get(key, []))
-        for key in metadata_rows.keys()
-    ) if metadata_rows else len(series_ids)
+    series_count = (
+        max(len(metadata_rows.get(key, [])) for key in metadata_rows.keys())
+        if metadata_rows
+        else len(series_ids)
+    )
 
     series_metadata = []
     for idx in range(series_count):
         series_id = clean_text(series_ids[idx] if idx < len(series_ids) else "")
-        title = clean_text(metadata_rows.get("Title", [])[idx] if idx < len(metadata_rows.get("Title", [])) else "")
-        description = clean_text(metadata_rows.get("Description", [])[idx] if idx < len(metadata_rows.get("Description", [])) else "")
-        frequency = clean_text(metadata_rows.get("Frequency", [])[idx] if idx < len(metadata_rows.get("Frequency", [])) else "")
-        series_type = clean_text(metadata_rows.get("Type", [])[idx] if idx < len(metadata_rows.get("Type", [])) else "")
-        unit = clean_text(metadata_rows.get("Units", [])[idx] if idx < len(metadata_rows.get("Units", [])) else "")
-        source = clean_text(metadata_rows.get("Source", [])[idx] if idx < len(metadata_rows.get("Source", [])) else "")
+        title = clean_text(
+            metadata_rows.get("Title", [])[idx] if idx < len(metadata_rows.get("Title", [])) else ""
+        )
+        description = clean_text(
+            metadata_rows.get("Description", [])[idx]
+            if idx < len(metadata_rows.get("Description", []))
+            else ""
+        )
+        frequency = clean_text(
+            metadata_rows.get("Frequency", [])[idx]
+            if idx < len(metadata_rows.get("Frequency", []))
+            else ""
+        )
+        series_type = clean_text(
+            metadata_rows.get("Type", [])[idx] if idx < len(metadata_rows.get("Type", [])) else ""
+        )
+        unit = clean_text(
+            metadata_rows.get("Units", [])[idx] if idx < len(metadata_rows.get("Units", [])) else ""
+        )
+        source = clean_text(
+            metadata_rows.get("Source", [])[idx]
+            if idx < len(metadata_rows.get("Source", []))
+            else ""
+        )
         publication_date = clean_text(
             metadata_rows.get("Publication date", [])[idx]
             if idx < len(metadata_rows.get("Publication date", []))
             else ""
         )
-        if not any([series_id, title, description, frequency, series_type, unit, source, publication_date]):
+        if not any(
+            [series_id, title, description, frequency, series_type, unit, source, publication_date]
+        ):
             continue
+        if not series_id:
+            raise ValueError(f"RBA CSV column {idx + 1} has metadata but no Series ID.")
+        if any(item["series_id"] == series_id for item in series_metadata):
+            raise ValueError(f"RBA CSV contains duplicate Series ID {series_id}.")
         series_metadata.append(
             {
                 "column_index": idx + 1,
-                "series_id": series_id or f"SERIES_{idx + 1}",
+                "series_id": series_id,
                 "title": title or series_id or f"Series {idx + 1}",
                 "description": description,
                 "frequency": frequency,
@@ -139,7 +174,7 @@ def parse_table(rows: list[list[str]]) -> dict:
     }
 
 
-def build_metadata(args: argparse.Namespace, parsed: dict, curation: dict) -> dict:
+def build_metadata(flow: dict, parsed: dict, curation: dict) -> dict:
     series_codes = []
     for item in parsed["series_metadata"]:
         series_codes.append(
@@ -160,7 +195,7 @@ def build_metadata(args: argparse.Namespace, parsed: dict, curation: dict) -> di
         {
             "id": "SOURCE_URL",
             "name": "Source CSV URL",
-            "description": args.description,
+            "description": flow["description"],
         },
     ]
     if table_code:
@@ -174,12 +209,12 @@ def build_metadata(args: argparse.Namespace, parsed: dict, curation: dict) -> di
 
     return {
         "dataStructure": {
-            "id": args.dataset_id,
-            "agencyID": args.agency_id,
-            "version": args.version,
-            "name": args.name,
+            "id": flow["id"],
+            "agencyID": flow["agencyID"],
+            "version": flow["version"],
+            "name": flow["name"],
             "description": (
-                f"{args.description} Retrieve the full table with dataKey=all, or use a specific "
+                f"{flow['description']} Retrieve the full table with dataKey=all, or use a specific "
                 "Series ID from the SERIES_IDS codelist to narrow to one series."
             ),
         },
@@ -196,7 +231,11 @@ def build_metadata(args: argparse.Namespace, parsed: dict, curation: dict) -> di
             {"id": "FREQUENCY", "attachmentLevel": "Series", "conceptId": "FREQUENCY"},
             {"id": "TYPE", "attachmentLevel": "Series", "conceptId": "TYPE"},
             {"id": "SOURCE", "attachmentLevel": "Series", "conceptId": "SOURCE"},
-            {"id": "PUBLICATION_DATE", "attachmentLevel": "Series", "conceptId": "PUBLICATION_DATE"},
+            {
+                "id": "PUBLICATION_DATE",
+                "attachmentLevel": "Series",
+                "conceptId": "PUBLICATION_DATE",
+            },
         ],
         "codelists": [
             {
@@ -224,9 +263,10 @@ def select_series(data_key: str, parsed: dict) -> list[dict]:
     return selected
 
 
-def build_resolved_dataset(args: argparse.Namespace, parsed: dict, curation: dict) -> dict:
-    selected_series = select_series(args.data_key or "all", parsed)
+def build_resolved_dataset(flow: dict, parsed: dict, curation: dict, data_key: str = "all") -> dict:
+    selected_series = select_series(data_key or "all", parsed)
     selected_by_column = {item["column_index"]: item for item in selected_series}
+    source_column_count = max(item["column_index"] for item in parsed["series_metadata"])
 
     dimensions_lookup = {
         "SERIES_ID": {},
@@ -272,21 +312,30 @@ def build_resolved_dataset(args: argparse.Namespace, parsed: dict, curation: dic
         if not row:
             continue
         period_label = clean_text(row[0] if len(row) > 0 else "")
-        if not period_label or not is_date_like(period_label):
+        if not period_label and not any(clean_text(cell) for cell in row):
             continue
-        dimensions_lookup["TIME_PERIOD"][period_label] = period_label
+        period = parse_period(period_label)
+        if period in dimensions_lookup["TIME_PERIOD"]:
+            raise ValueError(f"RBA CSV contains duplicate observation date {period}.")
+        dimensions_lookup["TIME_PERIOD"][period] = period_label
+        if any(clean_text(cell) for cell in row[source_column_count + 1 :]):
+            raise ValueError("RBA CSV contains observation columns without Series ID metadata.")
         for column_index, item in selected_by_column.items():
             raw_value = row[column_index] if column_index < len(row) else ""
+            attributes = {"OBS_VALUE_RAW": raw_value}
+            # Official tables omit trailing empty fields, including date-only
+            # rows for unpublished periods. Preserve their missingness explicitly.
+            if column_index >= len(row):
+                attributes["SOURCE_CELL_OMITTED"] = True
             value = parse_float(raw_value)
-            if value is None:
-                continue
             series_lookup[item["series_id"]]["observations"].append(
                 {
-                    "observationKey": period_label,
+                    "observationKey": period,
                     "value": value,
+                    "attributes": attributes,
                     "dimensions": {
                         "TIME_PERIOD": {
-                            "code": normalize_code(period_label),
+                            "code": period,
                             "label": period_label,
                         }
                     },
@@ -295,43 +344,26 @@ def build_resolved_dataset(args: argparse.Namespace, parsed: dict, curation: dic
             observation_count += 1
 
     if observation_count == 0:
-        raise ValueError(f"No records extracted for dataKey '{args.data_key or 'all'}'")
+        raise ValueError(f"No records extracted for dataKey '{data_key or 'all'}'")
 
     table_code = clean_text((curation or {}).get("tableCode") or "")
     query = {
-        "dataKey": args.data_key or "all",
-        "detail": args.detail,
+        "dataKey": data_key or "all",
+        "detail": "full",
     }
     if table_code:
         query["tableCode"] = table_code
 
     return {
         "dataset": {
-            "id": args.dataset_id,
-            "agencyID": args.agency_id,
-            "version": args.version,
-            "name": args.name,
-            "description": args.description,
+            "id": flow["id"],
+            "agencyID": flow["agencyID"],
+            "version": flow["version"],
+            "name": flow["name"],
+            "description": flow["description"],
         },
         "query": query,
         "dimensions": dimensions_lookup,
         "observationCount": observation_count,
         "series": series_list,
     }
-
-
-def main() -> None:
-    args = parse_args()
-    curation = json.loads(args.curation_json)
-    rows = load_rows(Path(args.csv))
-    parsed = parse_table(rows)
-
-    if args.command == "metadata":
-        print(json.dumps(build_metadata(args, parsed, curation)))
-        return
-
-    print(json.dumps(build_resolved_dataset(args, parsed, curation)))
-
-
-if __name__ == "__main__":
-    main()

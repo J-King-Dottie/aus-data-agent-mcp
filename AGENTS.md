@@ -4,12 +4,14 @@ This project is an MCP for public-data retrieval and analysis support. The calli
 
 ## Architecture
 
-- `ausdata_mcp/server.py`: MCP tools, artifacts, protocol instructions, resource and prompt.
+- `ausdata_mcp/server.py`: three MCP tools, threaded dispatch, parameter validation, protocol instructions, resource and prompt.
+- `ausdata_mcp/artifacts.py`: atomic JSON evidence storage and bounded retrieval manifests.
 - `ausdata_mcp/unified_catalog.py`: normalized session catalogue, atomic generation checks and one SQLite FTS index.
 - `ausdata_mcp/catalog_sources.py`: live source-specific discovery adapters; no dataset observations.
 - `ausdata_mcp/catalog_refresh.py`: parallel refresh, expiry, retry and source coverage status.
 - `ausdata_mcp/runtime.py`: common runtime/session identity for cache and artifacts.
-- `ausdata_mcp/domestic_data.py`: ABS and direct Australian sources.
+- `ausdata_mcp/domestic_data.py`: ABS and direct Australian sources, with bounded metadata/file caches.
+- `ausdata_mcp/rba_tables.py` and `ausdata_mcp/energy_workbook.py`: in-process official-file parsers; no subprocess or spreadsheet-app dependencies.
 - `ausdata_mcp/macro_data.py`: OECD, World Bank, IMF and UN Comtrade retrieval.
 - `ausdata_mcp/pacific_data.py`: Pacific Data Hub/SPC live catalogue, SDMX structure/codelists and validated retrieval, adapted from the Pacific Data Hub Agent MCP.
 - `ausdata_mcp/data_config.py`: source configuration without model or database dependencies.
@@ -42,6 +44,7 @@ This project is an MCP for public-data retrieval and analysis support. The calli
 
 - Run `python -m unittest discover -s tests -v` and `python -m compileall -q ausdata_mcp scripts`.
 - Check the real stdio MCP path from a different working directory, without model credentials or app packages.
+- Run `ruff check ausdata_mcp scripts tests` and `ruff format --check ausdata_mcp scripts tests` with `requirements-dev.txt` installed.
 - Keep deterministic regressions offline; use opt-in live smoke checks to distinguish provider/network failures from code failures.
 - Confirm README, this file, AGENT_SYSTEM_PROMPT.md, llms.txt, tool descriptions and .mcp.json agree.
 - This checkout lives in WSL at `/home/projects/abs-mcp`, accessible on Windows through `\\wsl.localhost\Ubuntu\home\projects\abs-mcp`.

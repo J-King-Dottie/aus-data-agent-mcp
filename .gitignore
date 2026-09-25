@@ -14,6 +14,11 @@ __pycache__/
 *.pyo
 *.pyd
 
+# Developer tools
+.ruff_cache/
+.coverage
+htmlcov/
+
 # Build output
 dist/
 build/
