@@ -83,7 +83,6 @@ def _custom_entry(flow):
             ]
         ),
         "sourceUrl": flow["sourcePageUrl"],
-        "requiresMetadataBeforeRetrieval": True,
         "providerConfig": {},
         "sourceRecord": flow,
     }
@@ -116,7 +115,6 @@ def fetch_rba_catalog(client):
             "name": name,
             "description": f"Reserve Bank of Australia statistical table {code}: {name}. Live time-series CSV; inspect metadata for individual series.",
             "flowType": "rba_tables_csv",
-            "sourceType": "csv",
             "sourceOrganization": RBA_PROVIDER,
             "sourcePageUrl": RBA_PAGE,
             "sourceUrl": url,
@@ -165,44 +163,11 @@ def fetch_energy_catalog(client):
         "description": label
         + ". Electricity generation by fuel, state, financial year and calendar year. Inspect workbook metadata for available periods and sheets.",
         "flowType": "dcceew_aes_xlsx",
-        "sourceType": "xlsx",
         "sourceOrganization": ENERGY_PROVIDER,
         "sourcePageUrl": publication,
         "sourceUrl": downloads[0],
-        "curation": {"discoverSheets": True},
     }
     return [_custom_entry(flow)]
-
-
-def _normalize_macro(items):
-    entries = []
-    for item in dedupe_entries(items):
-        config = item["provider_config"]
-        entries.append(
-            {
-                "route": "macro",
-                "provider": item["provider_name"],
-                "datasetId": item["entry_id"],
-                "title": item["indicator_label"],
-                "description": item["description"],
-                "searchText": item["search_text"],
-                "sourceUrl": config.get("source_url_template", ""),
-                "requiresMetadataBeforeRetrieval": True,
-                **{
-                    camel: item[snake]
-                    for camel, snake in (
-                        ("providerKey", "provider_key"),
-                        ("providerName", "provider_name"),
-                        ("conceptId", "concept_id"),
-                        ("conceptLabel", "concept_label"),
-                        ("indicatorLabel", "indicator_label"),
-                        ("unit", "unit"),
-                        ("providerConfig", "provider_config"),
-                    )
-                },
-            }
-        )
-    return entries
 
 
 def fetch_source(provider):
@@ -223,7 +188,7 @@ def fetch_source(provider):
                     "IMF": fetch_imf_catalog,
                     "OECD": fetch_oecd_catalog,
                 }[provider]
-                entries = _normalize_macro(fetch(client))
+                entries = fetch(client)
             elif provider == RBA_PROVIDER:
                 entries = fetch_rba_catalog(client)
             elif provider == ENERGY_PROVIDER:
@@ -236,7 +201,7 @@ def fetch_source(provider):
                 flows = response.json()["results"]
                 if not {"M", "X"}.issubset({str(row["id"]) for row in flows}):
                     raise RuntimeError("Comtrade no longer lists supported import/export flows.")
-                entries = _normalize_macro(build_comtrade_catalog())
+                entries = build_comtrade_catalog()
                 entries[0]["catalogueSourceUrl"] = COMTRADE_FLOWS
                 entries[0]["discoveryScope"] = (
                     "One supported goods-trade cube; live import/export capability check. Commodity and country metadata is separate."
@@ -291,6 +256,14 @@ def fetch_world_bank_catalog(client: httpx.Client) -> list[dict[str, Any]]:
         )
         if not isinstance(page_rows, list) or not page_rows:
             raise RuntimeError(f"World Bank indicator page {page} was empty or invalid.")
+        page_meta = page_payload[0]
+        if (
+            not isinstance(page_meta, dict)
+            or int(page_meta.get("page", page)) != page
+            or int(page_meta.get("pages", pages)) != pages
+            or page_meta.get("total", meta.get("total")) != meta.get("total")
+        ):
+            raise RuntimeError("World Bank catalogue changed during pagination; retry the refresh.")
         all_rows.extend(page_rows)
 
     if meta.get("total") is not None and len(all_rows) != int(meta["total"]):
@@ -332,23 +305,21 @@ def fetch_world_bank_catalog(client: httpx.Client) -> list[dict[str, Any]]:
         source_url = f"https://data.worldbank.org/indicator/{indicator_id}"
         entries.append(
             {
-                "entry_id": f"worldbank::{indicator_id}"
+                "datasetId": f"worldbank::{indicator_id}"
                 if source_id == "2"
                 else f"worldbank::{source_id}::{indicator_id}",
-                "provider_key": "worldbank",
-                "provider_name": WORLD_BANK_PROVIDER,
-                "concept_id": indicator_id,
-                "concept_label": label,
-                "indicator_label": label,
+                "route": "macro",
+                "sourceUrl": source_url,
+                "providerKey": "worldbank",
+                "provider": WORLD_BANK_PROVIDER,
+                "title": label,
                 "unit": "",
                 "description": description or label,
-                "search_text": search_text,
-                "provider_config": {
+                "searchText": search_text,
+                "providerConfig": {
                     "series_id": indicator_id,
                     "source_id": source_id,
                     "source_name": source_label,
-                    "label": label,
-                    "source_url_template": source_url,
                 },
             }
         )
@@ -382,18 +353,18 @@ def fetch_imf_catalog(client: httpx.Client) -> list[dict[str, Any]]:
         )
         entries.append(
             {
-                "entry_id": f"imf::{clean_series_id}",
-                "provider_key": "imf",
-                "provider_name": IMF_PROVIDER,
-                "concept_id": clean_series_id,
-                "concept_label": label,
-                "indicator_label": label,
+                "datasetId": f"imf::{clean_series_id}",
+                "route": "macro",
+                "sourceUrl": source_url,
+                "providerKey": "imf",
+                "provider": IMF_PROVIDER,
+                "title": label,
                 "unit": unit,
                 "description": _clean_text(
                     " ".join(part for part in [label, description, source, unit] if part)
                 )
                 or label,
-                "search_text": _join_search_text(
+                "searchText": _join_search_text(
                     [
                         clean_series_id,
                         label,
@@ -405,11 +376,9 @@ def fetch_imf_catalog(client: httpx.Client) -> list[dict[str, Any]]:
                         "international monetary fund",
                     ]
                 ),
-                "provider_config": {
+                "providerConfig": {
                     "series_id": clean_series_id,
-                    "label": label,
                     "dataset": dataset,
-                    "source_url_template": source_url,
                 },
             }
         )
@@ -462,15 +431,15 @@ def fetch_oecd_catalog(client: httpx.Client) -> list[dict[str, Any]]:
         source_url = f"{get_data_settings().oecd_base_url.rstrip('/')}/data/{agency_id},{dataflow_id},{version}"
         entries.append(
             {
-                "entry_id": f"oecd::{agency_id}::{dataflow_id}::{version}",
-                "provider_key": "oecd",
-                "provider_name": OECD_PROVIDER,
-                "concept_id": dataflow_id,
-                "concept_label": label,
-                "indicator_label": label,
+                "datasetId": f"oecd::{agency_id}::{dataflow_id}::{version}",
+                "route": "macro",
+                "sourceUrl": source_url,
+                "providerKey": "oecd",
+                "provider": OECD_PROVIDER,
+                "title": label,
                 "unit": "",
                 "description": description or label,
-                "search_text": _join_search_text(
+                "searchText": _join_search_text(
                     [
                         dataflow_id,
                         label,
@@ -479,12 +448,10 @@ def fetch_oecd_catalog(client: httpx.Client) -> list[dict[str, Any]]:
                         "oecd",
                     ]
                 ),
-                "provider_config": {
+                "providerConfig": {
                     "agency": agency_id,
                     "dataflow": dataflow_id,
                     "version": version,
-                    "label": label,
-                    "source_url_template": source_url,
                 },
             }
         )
@@ -495,20 +462,20 @@ def build_comtrade_catalog() -> list[dict[str, Any]]:
     label = "UN Comtrade goods trade (imports and exports by partner and HS code)"
     description = (
         "UN Comtrade goods trade retrieval for imports and exports, bilateral trade, world totals, "
-        "and HS product codes down to 4-digit headings. Metadata exposes reporter countries, "
-        "partner areas, annual or monthly frequency, and HS code descriptions."
+        "and HS product codes down to 6-digit subheadings. Metadata exposes reporter countries, "
+        "partner areas, annual or monthly frequency, HS descriptions, secondary partners, customs and transport modes."
     )
     return [
         {
-            "entry_id": "comtrade::goods_trade",
-            "provider_key": "comtrade",
-            "provider_name": COMTRADE_PROVIDER,
-            "concept_id": "goods_trade",
-            "concept_label": "Goods trade",
-            "indicator_label": label,
+            "datasetId": "comtrade::goods_trade",
+            "route": "macro",
+            "sourceUrl": "https://comtradeplus.un.org/TradeFlow",
+            "providerKey": "comtrade",
+            "provider": COMTRADE_PROVIDER,
+            "title": label,
             "unit": "US Dollars",
             "description": description,
-            "search_text": _join_search_text(
+            "searchText": _join_search_text(
                 [
                     "goods trade",
                     "imports",
@@ -519,6 +486,8 @@ def build_comtrade_catalog() -> list[dict[str, Any]]:
                     "partner",
                     "hs code",
                     "hs4",
+                    "hs6",
+                    "customs transport mode second partner",
                     "hs 4 digit heading",
                     "commodity",
                     "merchandise trade",
@@ -527,46 +496,11 @@ def build_comtrade_catalog() -> list[dict[str, Any]]:
                     "comtrade",
                 ]
             ),
-            "provider_config": {
+            "providerConfig": {
                 "series_id": "UN_COMTRADE_GOODS_TRADE",
-                "label": "UN Comtrade goods trade",
-                "requires_metadata_before_retrieval": True,
-                "metadata_source": "COMTRADE_METADATA.json",
-                "source_url_template": "https://comtradeplus.un.org/TradeFlow",
             },
         }
     ]
-
-
-def dedupe_entries(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    deduped: dict[str, dict[str, Any]] = {}
-    for entry in entries:
-        entry_id = _clean_text(entry.get("entry_id"))
-        if not entry_id:
-            continue
-        existing = deduped.get(entry_id)
-        if existing is None:
-            deduped[entry_id] = entry
-            continue
-        existing["search_text"] = _join_search_text(
-            [existing.get("search_text", ""), entry.get("search_text", "")]
-        )
-        if len(_clean_text(entry.get("description"))) > len(
-            _clean_text(existing.get("description"))
-        ):
-            existing["description"] = entry["description"]
-        if not _clean_text(existing.get("unit")) and _clean_text(entry.get("unit")):
-            existing["unit"] = entry["unit"]
-    return list(deduped.values())
-
-
-def _abs_source_url(agency_id: str, flow_id: str, version: str) -> str:
-    clean_agency = _clean_text(agency_id)
-    clean_flow = _clean_text(flow_id)
-    clean_version = _clean_text(version)
-    if not clean_agency or not clean_flow or not clean_version:
-        return ""
-    return f"{get_data_settings().abs_api_base.rstrip('/')}/rest/dataflow/{clean_agency}/{clean_flow}/{clean_version}"
 
 
 def _build_abs_entries() -> list[dict[str, Any]]:
@@ -594,15 +528,7 @@ def _build_abs_entries() -> list[dict[str, Any]]:
                         _clean_text(flow.get("description")),
                     ]
                 ),
-                "sourceUrl": _abs_source_url(agency_id, flow_id, version),
-                "requiresMetadataBeforeRetrieval": True,
-                "providerKey": "",
-                "providerName": "ABS",
-                "conceptId": "",
-                "conceptLabel": "",
-                "indicatorLabel": "",
-                "unit": "",
-                "providerConfig": {},
+                "sourceUrl": f"{get_data_settings().abs_api_base.rstrip('/')}/rest/dataflow/{agency_id}/{flow_id}/{version}",
                 "sourceRecord": flow,
             }
         )

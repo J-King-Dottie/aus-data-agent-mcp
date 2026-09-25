@@ -8,7 +8,7 @@ import time
 from contextlib import closing
 from functools import lru_cache, wraps
 from threading import RLock
-from typing import Any
+from typing import Any, TypedDict
 from uuid import uuid4
 
 from .catalog_refresh import (
@@ -26,6 +26,22 @@ FTS_DB_PATH = CATALOG_PATH.with_name("search.sqlite3")
 CATALOG_LOCK = RLock()
 _payload = None
 _payload_path = None
+
+
+class SearchResult(TypedDict):
+    """Public MCP discovery page and source coverage, without observations."""
+
+    query: str
+    total: int
+    returned_count: int
+    limit: int
+    offset: int
+    next_offset: int | None
+    provider: str | None
+    ordering: str
+    candidates: list[dict[str, Any]]
+    catalogue: dict[str, Any]
+    warnings: list[str]
 
 
 def _valid_snapshot(payload):
@@ -95,19 +111,11 @@ def _clean_text(value: Any) -> str:
     return re.sub(r"\s+", " ", str(value or "").strip())
 
 
-def _normalize_tokens(query: str) -> list[str]:
-    raw_tokens = re.findall(r"[A-Za-z0-9]+", str(query or "").lower())
-    return [token for token in raw_tokens if len(token) > 1 and token not in STOPWORDS]
-
-
-def _build_match_query(tokens: list[str], operator: str) -> str:
-    if not tokens:
-        return ""
-    return f" {operator} ".join(f'"{token}"*' for token in tokens)
-
-
-def _relaxed_match_query(query: str) -> str:
-    return _build_match_query(_normalize_tokens(query), "OR")
+def _match_query(query: str) -> str:
+    tokens = re.findall(r"[A-Za-z0-9]+", query.lower())
+    return " OR ".join(
+        f'"{token}"*' for token in tokens if len(token) > 1 and token not in STOPWORDS
+    )
 
 
 def _invalidate_caches() -> None:
@@ -130,8 +138,7 @@ def build_catalog_index(entries: list[dict[str, Any]], generation: str = "") -> 
                 title TEXT NOT NULL,
                 description TEXT NOT NULL,
                 search_text TEXT NOT NULL,
-                source_url TEXT NOT NULL,
-                requires_metadata_before_retrieval INTEGER NOT NULL
+                source_url TEXT NOT NULL
             );
 
             CREATE VIRTUAL TABLE catalog_fts USING fts5(
@@ -153,9 +160,8 @@ def build_catalog_index(entries: list[dict[str, Any]], generation: str = "") -> 
                 title,
                 description,
                 search_text,
-                source_url,
-                requires_metadata_before_retrieval
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                source_url
+            ) VALUES (?, ?, ?, ?, ?, ?)
             """,
             [
                 (
@@ -165,7 +171,6 @@ def build_catalog_index(entries: list[dict[str, Any]], generation: str = "") -> 
                     entry["description"],
                     entry["searchText"],
                     entry["sourceUrl"],
-                    1 if entry["requiresMetadataBeforeRetrieval"] else 0,
                 )
                 for entry in entries
             ],
@@ -254,7 +259,6 @@ def _row_to_entry(row: sqlite3.Row) -> dict[str, Any]:
         "description": str(row["description"] or "")[:500],
         "description_truncated": len(str(row["description"] or "")) > 500,
         "sourceUrl": row["source_url"],
-        "requiresMetadataBeforeRetrieval": bool(row["requires_metadata_before_retrieval"]),
     }
 
 
@@ -279,7 +283,7 @@ def _matching_rows(
     if not match_query:
         return connection.execute(
             """
-            SELECT provider, dataset_id, title, description, source_url, requires_metadata_before_retrieval
+            SELECT provider, dataset_id, title, description, source_url
             FROM catalog
             WHERE (? = '' OR provider = ? COLLATE NOCASE)
             ORDER BY provider, title, dataset_id
@@ -294,8 +298,7 @@ def _matching_rows(
             c.dataset_id,
             c.title,
             c.description,
-            c.source_url,
-            c.requires_metadata_before_retrieval
+            c.source_url
         FROM catalog_fts f
         JOIN catalog c ON c.rowid = f.rowid
         WHERE catalog_fts MATCH ? AND (? = '' OR c.provider = ? COLLATE NOCASE)
@@ -309,7 +312,7 @@ def _matching_rows(
 @_locked
 def search_unified_catalog(
     query: str, limit: int = 50, *, offset: int = 0, force_refresh: bool = False, provider: str = ""
-) -> dict[str, Any]:
+) -> SearchResult:
     aliases = {
         "rba": RBA_PROVIDER,
         "dcceew": ENERGY_PROVIDER,
@@ -338,7 +341,7 @@ def search_unified_catalog(
     connection = sqlite3.connect(FTS_DB_PATH)
     connection.row_factory = sqlite3.Row
     try:
-        match_query = _relaxed_match_query(clean_query)
+        match_query = _match_query(clean_query)
         matching_count = _matching_count(connection, match_query, provider)
         rows = _matching_rows(connection, match_query, provider, clean_limit, clean_offset)
         entries = [_row_to_entry(row) for row in rows]

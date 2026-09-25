@@ -8,7 +8,7 @@ from uuid import uuid4
 from .catalog_sources import PROVIDERS, fetch_source
 from .runtime import CATALOG_TTL_SECONDS
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 RETRY_SECONDS = 60
 
 
@@ -35,7 +35,6 @@ def valid_entry(row, provider=None):
         and bool(row["datasetId"])
         and row["provider"] in PROVIDERS
         and (provider is None or row["provider"] == provider)
-        and isinstance(row.get("requiresMetadataBeforeRetrieval"), bool)
     )
 
 

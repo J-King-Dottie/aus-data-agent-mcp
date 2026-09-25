@@ -21,7 +21,7 @@ class RetrievalManifestTests(unittest.TestCase):
         points = [{"x": str(year), "y": year} for year in range(2000, 2025)]
         payload = {
             "provider": "World Bank",
-            "selected_indicator": {"entry_id": "worldbank::TEST"},
+            "kind": "macro_retrieve",
             "series": [
                 {
                     "country_code": "AUS",
@@ -47,6 +47,24 @@ class RetrievalManifestTests(unittest.TestCase):
         self.assertEqual((manifest["period_start"], manifest["period_end"]), ("2000", "2024"))
         self.assertEqual(manifest["unit_examples"], ["USD"])
         self.assertNotIn("series", manifest)
+        self.assertEqual(saved["dataset_id"], "worldbank::TEST")
+        self.assertEqual(manifest["warnings"], [])
+
+    def test_all_suppressed_evidence_is_preserved_with_an_explicit_warning(self):
+        payload = {
+            "series": [
+                {
+                    "observations": [
+                        {"observationKey": "2024", "value": None, "attributes": {"OBS_STATUS": "C"}}
+                    ]
+                }
+            ]
+        }
+        manifest = artifacts.store_retrieval(payload, "ABS,TEST,1.0", "Suppressed")
+        saved = json.loads(Path(manifest["artifact_path"]).read_text())
+        self.assertEqual(manifest["missing_value_count"], manifest["row_count"])
+        self.assertIn("no numeric values", manifest["warnings"][0])
+        self.assertEqual(saved["series"][0]["observations"][0]["attributes"]["OBS_STATUS"], "C")
 
     def test_large_artifact_manifest_prompts_size_notice(self):
         payload = {
@@ -95,6 +113,31 @@ class RetrievalManifestTests(unittest.TestCase):
         self.assertEqual(manifest["unit_multiplier_codes"], ["3"])
         self.assertEqual(saved["series"][0]["observations"][1]["attributes"]["OBS_STATUS"], "M")
         self.assertEqual(saved["source_annotations"]["NonProductionDataflow"], ["true"])
+        self.assertIn("non-production", manifest["warnings"][0])
+
+    def test_oecd_manifest_identifies_dimensions_and_unscaled_values(self):
+        payload = {
+            "kind": "macro_retrieve",
+            "series": [
+                {
+                    "country_code": "AUS",
+                    "series_id": "TEST",
+                    "series_key": "AUS.F",
+                    "dimensions": {"REF_AREA": "AUS", "SEX": "F"},
+                    "points": [
+                        {"x": "2024", "y": 2, "source_row": {"UNIT_MULT": "3", "OBS_STATUS": "E"}}
+                    ],
+                }
+            ],
+            "source_annotations": {"NonProductionDataflow": ["false"]},
+        }
+        manifest = artifacts.store_retrieval(payload, "oecd::TEST", "Test")
+        self.assertIn("SEX", manifest["dimension_ids"])
+        self.assertIn("OBS_STATUS", manifest["attribute_ids"])
+        self.assertEqual(manifest["unit_multiplier_codes"], ["3"])
+        self.assertEqual(manifest["preview_rows"][0]["series_key"], "AUS.F")
+        self.assertEqual(manifest["preview_rows"][0]["value"], 2)
+        self.assertEqual(manifest["warnings"], [])
 
     def test_abs_manifest_uses_time_dimension_instead_of_observation_index(self):
         payload = {

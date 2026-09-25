@@ -186,27 +186,6 @@ def build_metadata(flow: dict, parsed: dict, curation: dict) -> dict:
         )
 
     table_code = clean_text((curation or {}).get("tableCode") or "")
-    concepts = [
-        {
-            "id": "DATA_KEY",
-            "name": "Custom retrieval key",
-            "description": "Use dataKey equal to a Series ID to retrieve one series, or use all to retrieve the full RBA table.",
-        },
-        {
-            "id": "SOURCE_URL",
-            "name": "Source CSV URL",
-            "description": flow["description"],
-        },
-    ]
-    if table_code:
-        concepts.append(
-            {
-                "id": "TABLE_CODE",
-                "name": "RBA table code",
-                "description": table_code,
-            }
-        )
-
     return {
         "dataStructure": {
             "id": flow["id"],
@@ -215,26 +194,24 @@ def build_metadata(flow: dict, parsed: dict, curation: dict) -> dict:
             "name": flow["name"],
             "description": (
                 f"{flow['description']} Retrieve the full table with dataKey=all, or use a specific "
-                "Series ID from the SERIES_IDS codelist to narrow to one series."
+                "Series ID or + joined IDs from the SERIES_IDS codelist."
             ),
         },
         "dimensions": [
             {
                 "id": "SERIES_ID",
                 "position": 1,
-                "conceptId": "SERIES_ID",
                 "codelist": {"id": "SERIES_IDS"},
             }
         ],
         "attributes": [
-            {"id": "UNIT", "attachmentLevel": "Series", "conceptId": "UNIT"},
-            {"id": "FREQUENCY", "attachmentLevel": "Series", "conceptId": "FREQUENCY"},
-            {"id": "TYPE", "attachmentLevel": "Series", "conceptId": "TYPE"},
-            {"id": "SOURCE", "attachmentLevel": "Series", "conceptId": "SOURCE"},
+            {"id": "UNIT", "attachmentLevel": "Series"},
+            {"id": "FREQUENCY", "attachmentLevel": "Series"},
+            {"id": "TYPE", "attachmentLevel": "Series"},
+            {"id": "SOURCE", "attachmentLevel": "Series"},
             {
                 "id": "PUBLICATION_DATE",
                 "attachmentLevel": "Series",
-                "conceptId": "PUBLICATION_DATE",
             },
         ],
         "codelists": [
@@ -244,7 +221,7 @@ def build_metadata(flow: dict, parsed: dict, curation: dict) -> dict:
                 "codes": series_codes,
             }
         ],
-        "concepts": concepts,
+        "table_code": table_code,
     }
 
 
@@ -253,13 +230,11 @@ def select_series(data_key: str, parsed: dict) -> list[dict]:
     selected_key = clean_text(data_key or "all")
     if not selected_key or selected_key.lower() == "all":
         return series_items
-    selected = [
-        item
-        for item in series_items
-        if clean_text(item["series_id"]).upper() == selected_key.upper()
-    ]
-    if not selected:
-        raise ValueError(f"Unknown RBA series id '{data_key}'")
+    requested = {code.strip().upper() for code in selected_key.split("+")}
+    available = {item["series_id"].upper() for item in series_items}
+    if missing := requested - available:
+        raise ValueError(f"Unknown RBA series IDs {sorted(missing)}. Browse SERIES_ID metadata.")
+    selected = [item for item in series_items if item["series_id"].upper() in requested]
     return selected
 
 

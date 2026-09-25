@@ -288,27 +288,6 @@ def build_metadata(flow: dict, curation: dict, workbook_sheets: dict) -> dict:
                         "description": sheet_title(workbook_sheets[sheet_name]),
                     }
                 )
-    concepts = [
-        {
-            "id": "DATA_KEY",
-            "name": "Custom retrieval key",
-            "description": "Use dataKey equal to one of the discovered SHEET_GROUP ids to retrieve a grouped workbook slice.",
-        },
-        {
-            "id": "SOURCE_URL",
-            "name": "Source workbook URL",
-            "description": flow["description"],
-        },
-    ]
-    if ignored_sheets:
-        concepts.append(
-            {
-                "id": "IGNORED_SHEETS",
-                "name": "Ignored sheets",
-                "description": ", ".join(ignored_sheets),
-            }
-        )
-
     return {
         "dataStructure": {
             "id": flow["id"],
@@ -325,13 +304,11 @@ def build_metadata(flow: dict, curation: dict, workbook_sheets: dict) -> dict:
             {
                 "id": "SHEET_GROUP",
                 "position": 1,
-                "conceptId": "SHEET_GROUP",
                 "codelist": {"id": "SHEET_GROUPS"},
             },
             {
                 "id": "SHEET",
                 "position": 2,
-                "conceptId": "SHEET",
                 "codelist": {"id": "SHEETS"},
             },
         ],
@@ -339,7 +316,6 @@ def build_metadata(flow: dict, curation: dict, workbook_sheets: dict) -> dict:
             {
                 "id": "UNIT",
                 "attachmentLevel": "Observation",
-                "conceptId": "UNIT",
             }
         ],
         "codelists": [
@@ -354,15 +330,15 @@ def build_metadata(flow: dict, curation: dict, workbook_sheets: dict) -> dict:
                 "codes": sheet_codes,
             },
         ],
-        "concepts": concepts,
+        "ignored_sheets": ignored_sheets,
     }
 
 
 def select_group(data_key: str, curation: dict) -> tuple[str, list[str]]:
     sheet_groups = curation.get("sheetGroups") or []
     if not data_key or data_key == "all":
-        raise ValueError(
-            "DCCEEW requires an explicit sheet group or sheet dataKey from get_metadata."
+        return "all", list(
+            dict.fromkeys(name for group in sheet_groups for name in group.get("sheets", []))
         )
     for item in sheet_groups:
         if item.get("id") == data_key:
@@ -382,7 +358,15 @@ def build_resolved_dataset(
         rows = workbook_sheets.get(sheet_name)
         if not rows:
             raise ValueError(f"Requested AES sheet {sheet_name!r} is absent or empty.")
-        sheet_records = extract_sheet_records(sheet_name, rows, group_id)
+        sheet_group = next(
+            (
+                group["id"]
+                for group in curation.get("sheetGroups", [])
+                if sheet_name in group.get("sheets", [])
+            ),
+            group_id,
+        )
+        sheet_records = extract_sheet_records(sheet_name, rows, sheet_group)
         if not sheet_records:
             raise ValueError(f"Requested AES sheet {sheet_name!r} contains no observations.")
         records.extend(sheet_records)

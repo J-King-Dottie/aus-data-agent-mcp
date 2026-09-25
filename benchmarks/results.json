@@ -1,4 +1,501 @@
 {
   "version": 1,
-  "runs": []
+  "runs": [
+    {
+      "run_id": "2026-09-25T02:09:18Z-codex-sequential",
+      "model": "gpt-6-sol",
+      "reasoning_level": "high",
+      "harness": "Codex desktop",
+      "started_at": "2026-09-25T02:09:18.820844+00:00",
+      "finished_at": "2026-09-25T02:15:40.517Z",
+      "duration_seconds": 381.696,
+      "usage": {
+        "input_tokens": 7652614,
+        "cached_input_tokens": 7621888,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 7469,
+        "reasoning_output_tokens": 949,
+        "total_tokens": 7660083,
+        "uncached_input_tokens": 30726
+      },
+      "estimated_cost_usd": 1.66052,
+      "cost_basis": "Estimated API-equivalent GPT-6 Sol Standard text pricing, checked 2026-09-25: USD 2.00/1M uncached input, USD 0.20/1M cached input, USD 10.00/1M output; https://developers.openai.com/api/docs/models/gpt-6-sol. Formula: (input_tokens - cached_input_tokens)*2/1M + cached_input_tokens*0.20/1M + output_tokens*10/1M. Excludes tool charges and any Codex subscription billing. No recorded request in the run exceeded 272K input tokens.",
+      "notes": "Sequential measurement run in one fresh stdio MCP session (benchmark-measured-367358). Per-case duration measures wall time from search_catalog start through reading the saved retrieval JSON. Tool timing reports actual MCP call time; retrieve is the source-data call alone. Per-case token counts are deltas of recorded Codex turn usage around each case's tool calls, including tool arguments and model reasoning up to the final artifact read, but excluding setup and final grading. Cached input is included in input and reasoning output is included in output. Suite usage is the sum of these attributed case deltas, not the entire Codex turn. Context accumulated through the sequential cases; run order and prior knowledge from the first run affect token use. This is a self-reviewed repeat, not a blind fresh-model test. The sum of case durations is 311.253 seconds; the full suite wall duration of 381.696 seconds also includes gaps between cases.",
+      "cases": [
+        {
+          "case_id": "abs_youth_unemployment",
+          "started_at": "2026-09-25T02:09:18.820844+00:00",
+          "finished_at": "2026-09-25T02:09:58.608Z",
+          "duration_seconds": 39.787,
+          "tool_timing_seconds": {
+            "search_catalog": 5.763,
+            "get_metadata": 0.331,
+            "retrieve": 0.302
+          },
+          "usage": {
+            "input_tokens": 868385,
+            "cached_input_tokens": 864512,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 1004,
+            "reasoning_output_tokens": 169,
+            "total_tokens": 869389,
+            "uncached_input_tokens": 3873
+          },
+          "answer": "August 2022 seasonally adjusted unemployment rates for Australians aged 15–24: males 9.2%, females 7.5%. Source: ABS Labour Force: Age Groups, M13 (https://data.api.abs.gov.au/rest/dataflow/ABS/LF_AGES/1.0.0).",
+          "dataset_id": "ABS,LF_AGES,1.0.0",
+          "artifact_path": "/home/projects/abs-mcp/runtime/sessions/benchmark-measured-367358/artifacts/retrieval-2c332298-85f1-4aba-a753-ec7b024d6d5c.json",
+          "estimated_cost_usd": 0.19069,
+          "correct": true
+        },
+        {
+          "case_id": "world_bank_gdp_per_capita",
+          "started_at": "2026-09-25T02:10:34.965829+00:00",
+          "finished_at": "2026-09-25T02:11:05.966Z",
+          "duration_seconds": 31.0,
+          "tool_timing_seconds": {
+            "search_catalog": 0.163,
+            "get_metadata": 0.008,
+            "retrieve": 0.269
+          },
+          "usage": {
+            "input_tokens": 768327,
+            "cached_input_tokens": 764288,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 1135,
+            "reasoning_output_tokens": 419,
+            "total_tokens": 769462,
+            "uncached_input_tokens": 4039
+          },
+          "answer": "2022 GDP per capita (current US$): Australia US$65,169.52; New Zealand US$49,141.63. Australia was US$16,027.89 higher. Source: World Bank NY.GDP.PCAP.CD (https://data.worldbank.org/indicator/NY.GDP.PCAP.CD).",
+          "dataset_id": "worldbank::NY.GDP.PCAP.CD",
+          "artifact_path": "/home/projects/abs-mcp/runtime/sessions/benchmark-measured-367358/artifacts/retrieval-bb5d0a6a-0dee-4711-a8be-aa0f20e83084.json",
+          "estimated_cost_usd": 0.17229,
+          "correct": true
+        },
+        {
+          "case_id": "imf_unemployment",
+          "started_at": "2026-09-25T02:11:16.711343+00:00",
+          "finished_at": "2026-09-25T02:12:06.091Z",
+          "duration_seconds": 49.38,
+          "tool_timing_seconds": {
+            "search_catalog": 0.021,
+            "get_metadata": 0.008,
+            "retrieve": 10.093
+          },
+          "usage": {
+            "input_tokens": 1045645,
+            "cached_input_tokens": 1041664,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 1022,
+            "reasoning_output_tokens": 301,
+            "total_tokens": 1046667,
+            "uncached_input_tokens": 3981
+          },
+          "answer": "Australia's IMF unemployment rate was 3.7% in 2022 and 3.7% in 2023, a change of 0.0 percentage points. Source: IMF World Economic Outlook LUR (https://www.imf.org/external/datamapper/LUR@WEO/AUS).",
+          "dataset_id": "imf::LUR",
+          "artifact_path": "/home/projects/abs-mcp/runtime/sessions/benchmark-measured-367358/artifacts/retrieval-ddb72738-22f1-4a19-823a-29e8a8dd327f.json",
+          "estimated_cost_usd": 0.22651,
+          "correct": true
+        },
+        {
+          "case_id": "oecd_core_cpi",
+          "started_at": "2026-09-25T02:12:13.435641+00:00",
+          "finished_at": "2026-09-25T02:12:51.566Z",
+          "duration_seconds": 38.13,
+          "tool_timing_seconds": {
+            "search_catalog": 0.066,
+            "get_metadata": 0.006,
+            "retrieve": 1.585
+          },
+          "usage": {
+            "input_tokens": 932461,
+            "cached_input_tokens": 928640,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 831,
+            "reasoning_output_tokens": 8,
+            "total_tokens": 933292,
+            "uncached_input_tokens": 3821
+          },
+          "answer": "Australia's 2023 national CPI growth over one year, all items less food and energy (COICOP 2018), was 5.48054; OECD unit: Percent per annum. Source: OECD dataflow DSD_PRICES_COICOP2018@DF_PRICES_C2018_N_TXCP01_NRG (https://sdmx.oecd.org/public/rest/data/OECD.SDD.TPS,DSD_PRICES_COICOP2018@DF_PRICES_C2018_N_TXCP01_NRG,1.0).",
+          "dataset_id": "oecd::OECD.SDD.TPS::DSD_PRICES_COICOP2018@DF_PRICES_C2018_N_TXCP01_NRG::1.0",
+          "artifact_path": "/home/projects/abs-mcp/runtime/sessions/benchmark-measured-367358/artifacts/retrieval-70ddedd3-cf57-41ad-a099-a563de611d19.json",
+          "estimated_cost_usd": 0.20168,
+          "correct": true
+        },
+        {
+          "case_id": "rba_cash_rate",
+          "started_at": "2026-09-25T02:12:54.857881+00:00",
+          "finished_at": "2026-09-25T02:13:33.826Z",
+          "duration_seconds": 38.968,
+          "tool_timing_seconds": {
+            "search_catalog": 0.03,
+            "get_metadata": 1.974,
+            "retrieve": 0.513
+          },
+          "usage": {
+            "input_tokens": 949717,
+            "cached_input_tokens": 946432,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 771,
+            "reasoning_output_tokens": 9,
+            "total_tokens": 950488,
+            "uncached_input_tokens": 3285
+          },
+          "answer": "RBA cash rate target: 4.35% on both 1 March and 28 March 2024; change 0.00 percentage points. Source: RBA F1, FIRMMCRTD (https://www.rba.gov.au/statistics/tables/csv/f1-data.csv).",
+          "dataset_id": "CUSTOM_AUS,RBA_F1,1.0",
+          "artifact_path": "/home/projects/abs-mcp/runtime/sessions/benchmark-measured-367358/artifacts/retrieval-78e64bb9-0eb2-4d2d-baf8-6ad4be8b296b.json",
+          "estimated_cost_usd": 0.20357,
+          "correct": true
+        },
+        {
+          "case_id": "dcceew_black_coal",
+          "started_at": "2026-09-25T02:13:38.549234+00:00",
+          "finished_at": "2026-09-25T02:14:16.697Z",
+          "duration_seconds": 38.148,
+          "tool_timing_seconds": {
+            "search_catalog": 0.02,
+            "get_metadata": 1.636,
+            "retrieve": 0.016
+          },
+          "usage": {
+            "input_tokens": 964966,
+            "cached_input_tokens": 961536,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 843,
+            "reasoning_output_tokens": 11,
+            "total_tokens": 965809,
+            "uncached_input_tokens": 3430
+          },
+          "answer": "Australian black-coal electricity generation: 87,573 GWh in 1989–90 and 93,308.53 GWh in 2024–25; increase 5,735.53 GWh. Source: DCCEEW Table O1, national financial-year sheet (https://www.energy.gov.au/publications/australian-energy-statistics-table-o-electricity-generation-fuel-type-2024-25-and-2025). Workbook notes say totals may not add due to rounding; multi-fuel generation was allocated to specific fuels after 2013–14.",
+          "dataset_id": "CUSTOM_AUS,AES_TABLE_O,1.0",
+          "artifact_path": "/home/projects/abs-mcp/runtime/sessions/benchmark-measured-367358/artifacts/retrieval-d79d3cf7-7ebf-4bb7-b50a-9165b1cc7aa5.json",
+          "estimated_cost_usd": 0.2076,
+          "correct": true
+        },
+        {
+          "case_id": "pdh_fiji_energy",
+          "started_at": "2026-09-25T02:14:20.202302+00:00",
+          "finished_at": "2026-09-25T02:15:01.189Z",
+          "duration_seconds": 40.987,
+          "tool_timing_seconds": {
+            "search_catalog": 0.027,
+            "get_metadata": 1.085,
+            "retrieve": 0.553
+          },
+          "usage": {
+            "input_tokens": 1122350,
+            "cached_input_tokens": 1117952,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 1037,
+            "reasoning_output_tokens": 25,
+            "total_tokens": 1123387,
+            "uncached_input_tokens": 4398
+          },
+          "answer": "Fiji's ENERGY_IND_001, percentage of households with access to electricity, was 89% in 2010 and 96% in 2018. Status, data-source and comment fields are blank; no multiplier is supplied. The dataflow is marked NonProductionDataflow=true. Source: SPC Pacific Data Hub Energy indicators (https://stats-sdmx-disseminate.pacificdata.org/rest/dataflow/SPC/DF_ENERGY/1.0).",
+          "dataset_id": "pdh::SPC::DF_ENERGY::1.0",
+          "artifact_path": "/home/projects/abs-mcp/runtime/sessions/benchmark-measured-367358/artifacts/retrieval-535a08b8-672c-4bdf-9382-10616769e74e.json",
+          "estimated_cost_usd": 0.24276,
+          "correct": true
+        },
+        {
+          "case_id": "comtrade_australia_exports",
+          "started_at": "2026-09-25T02:15:05.663665+00:00",
+          "finished_at": "2026-09-25T02:15:40.517Z",
+          "duration_seconds": 34.853,
+          "tool_timing_seconds": {
+            "search_catalog": 0.021,
+            "get_metadata": 0.025,
+            "retrieve": 1.753
+          },
+          "usage": {
+            "input_tokens": 1000763,
+            "cached_input_tokens": 996864,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 826,
+            "reasoning_output_tokens": 7,
+            "total_tokens": 1001589,
+            "uncached_input_tokens": 3899
+          },
+          "answer": "Australia's total goods exports to the world in 2022 were US$410,252,834,479.043 (about US$410.253 billion). Scope: Australia reporter (36), World partner (0), annual export flow (X), all products (TOTAL). Source: UN Comtrade (https://comtradeplus.un.org/TradeFlow).",
+          "dataset_id": "comtrade::goods_trade",
+          "artifact_path": "/home/projects/abs-mcp/runtime/sessions/benchmark-measured-367358/artifacts/retrieval-d231b441-0cb3-43c5-b067-b0e1eb1df706.json",
+          "estimated_cost_usd": 0.21543,
+          "correct": true
+        }
+      ],
+      "case_duration_sum_seconds": 311.253
+    },
+    {
+      "run_id": "2026-09-25T04:24:14Z-astra-high-sequential",
+      "model": "gpt-6-astra",
+      "reasoning_level": "high",
+      "harness": "Codex desktop; real stdio MCP from /tmp",
+      "started_at": "2026-09-25T04:24:14.663436+00:00",
+      "finished_at": "2026-09-25T04:31:32.271692+00:00",
+      "duration_seconds": 437.608256,
+      "usage": {
+        "input_tokens": 5333952,
+        "cached_input_tokens": 5292032,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 4972,
+        "reasoning_output_tokens": 482,
+        "total_tokens": 5338924,
+        "uncached_input_tokens": 41920
+      },
+      "estimated_cost_usd": 5.959832,
+      "cost_basis": "Estimated API-equivalent GPT-6 Astra Standard text pricing, checked 2026-09-25: USD 10/1M uncached input, USD 1/1M cached input, USD 12.50/1M cache writes, USD 50/1M output. Source: https://developers.openai.com/api/docs/models/gpt-6-astra. Maximum recorded per-request input in this run: 153,425 tokens, below the 272K long-context pricing threshold. This is a Standard-rate comparison estimate, not actual Codex subscription billing or a service-tier charge.",
+      "notes": "Eight cases completed sequentially through search_catalog, get_metadata, retrieve and inspection of full saved JSON, in fresh MCP session benchmark-astra-high-20260925-0424. No source errors or retries. Current task metadata confirmed gpt-6-astra with high reasoning. This is a self-reviewed repeat in the existing cleanup conversation, not a blind fresh-model comparison: prior answers were seen in results.json during setup; answers.json was opened only after all eight new answers were completed and saved. Case durations span first search through checked JSON; tool times sum actual MCP calls, including metadata browsing. Token figures are actual deltas of the latest committed cumulative desktop usage counters sampled at each case boundary; raw snapshots and their event timestamps are retained. Desktop counters commit after tool execution, so these snapshots lag the current invocation: the final evidence-reading invocation is excluded at its end sample and may be counted in the following case. The DCCEEW completion and PDH search shared one orchestration invocation. No turn total was divided or estimated across cases. Treat per-case token/cost attribution as approximate; this run is useful for correctness and operational timing, not a controlled model-efficiency comparison. Input includes cached tokens and output includes reasoning. Setup, pricing lookup and final grading/reporting are outside the measured intervals. The first search includes cold discovery for all sources; subsequent cases reuse that catalogue. UN Comtrade retrieval took 48.342 seconds.",
+      "cases": [
+        {
+          "case_id": "abs_youth_unemployment",
+          "started_at": "2026-09-25T04:24:14.663436+00:00",
+          "finished_at": "2026-09-25T04:25:04.374037+00:00",
+          "duration_seconds": 49.710601,
+          "tool_timing_seconds": {
+            "search_catalog": 8.399,
+            "get_metadata": 0.356,
+            "retrieve": 2.259
+          },
+          "usage": {
+            "input_tokens": 611128,
+            "cached_input_tokens": 597504,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 477,
+            "reasoning_output_tokens": 91,
+            "total_tokens": 611605,
+            "uncached_input_tokens": 13624
+          },
+          "answer": "August 2022 seasonally adjusted unemployment rates for Australians aged 15–24: males 9.2%, females 7.5%. Source: ABS Labour Force: Age Groups, M13 (https://data.api.abs.gov.au/rest/dataflow/ABS/LF_AGES/1.0.0).",
+          "dataset_id": "ABS,LF_AGES,1.0.0",
+          "artifact_path": "/home/projects/abs-mcp/runtime/sessions/benchmark-astra-high-20260925-0424/artifacts/retrieval-58ee6871-8f76-4c65-b040-69a78957da74.json",
+          "estimated_cost_usd": 0.757594,
+          "correct": true,
+          "measurement": {
+            "start_snapshot": "/home/projects/abs-mcp/runtime/sessions/benchmark-astra-high-20260925-0424/abs_youth_unemployment-start.json",
+            "end_snapshot": "/home/projects/abs-mcp/runtime/sessions/benchmark-astra-high-20260925-0424/abs_youth_unemployment-end.json",
+            "token_start_event_at": "2026-09-25T04:24:14.533Z",
+            "token_end_event_at": "2026-09-25T04:24:53.410Z"
+          }
+        },
+        {
+          "case_id": "world_bank_gdp_per_capita",
+          "started_at": "2026-09-25T04:25:16.782812+00:00",
+          "finished_at": "2026-09-25T04:25:43.425566+00:00",
+          "duration_seconds": 26.642754,
+          "tool_timing_seconds": {
+            "search_catalog": 0.051,
+            "get_metadata": 0.02,
+            "retrieve": 0.479
+          },
+          "usage": {
+            "input_tokens": 393684,
+            "cached_input_tokens": 389760,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 513,
+            "reasoning_output_tokens": 94,
+            "total_tokens": 394197,
+            "uncached_input_tokens": 3924
+          },
+          "answer": "2022 GDP per capita (current US$): Australia US$65,169.52; New Zealand US$49,141.63. Australia was US$16,027.89 higher. Source: World Bank NY.GDP.PCAP.CD (https://data.worldbank.org/indicator/NY.GDP.PCAP.CD).",
+          "dataset_id": "worldbank::NY.GDP.PCAP.CD",
+          "artifact_path": "/home/projects/abs-mcp/runtime/sessions/benchmark-astra-high-20260925-0424/artifacts/retrieval-e7b1f365-cb72-447c-bb58-80c5b7755d36.json",
+          "estimated_cost_usd": 0.45465,
+          "correct": true,
+          "measurement": {
+            "start_snapshot": "/home/projects/abs-mcp/runtime/sessions/benchmark-astra-high-20260925-0424/world_bank_gdp_per_capita-start.json",
+            "end_snapshot": "/home/projects/abs-mcp/runtime/sessions/benchmark-astra-high-20260925-0424/world_bank_gdp_per_capita-end.json",
+            "token_start_event_at": "2026-09-25T04:25:04.621Z",
+            "token_end_event_at": "2026-09-25T04:25:29.945Z"
+          }
+        },
+        {
+          "case_id": "imf_unemployment",
+          "started_at": "2026-09-25T04:25:52.047220+00:00",
+          "finished_at": "2026-09-25T04:26:26.256659+00:00",
+          "duration_seconds": 34.209439,
+          "tool_timing_seconds": {
+            "search_catalog": 0.112,
+            "get_metadata": 0.011,
+            "retrieve": 10.006
+          },
+          "usage": {
+            "input_tokens": 536347,
+            "cached_input_tokens": 533760,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 458,
+            "reasoning_output_tokens": 17,
+            "total_tokens": 536805,
+            "uncached_input_tokens": 2587
+          },
+          "answer": "Australia's IMF unemployment rate was 3.7% in 2022 and 3.7% in 2023, a change of 0.0 percentage points. Source: IMF World Economic Outlook LUR (https://www.imf.org/external/datamapper/LUR@WEO/AUS).",
+          "dataset_id": "imf::LUR",
+          "artifact_path": "/home/projects/abs-mcp/runtime/sessions/benchmark-astra-high-20260925-0424/artifacts/retrieval-3d6c4b4c-5af6-41c3-8b72-5614934dfae7.json",
+          "estimated_cost_usd": 0.58253,
+          "correct": true,
+          "measurement": {
+            "start_snapshot": "/home/projects/abs-mcp/runtime/sessions/benchmark-astra-high-20260925-0424/imf_unemployment-start.json",
+            "end_snapshot": "/home/projects/abs-mcp/runtime/sessions/benchmark-astra-high-20260925-0424/imf_unemployment-end.json",
+            "token_start_event_at": "2026-09-25T04:25:43.683Z",
+            "token_end_event_at": "2026-09-25T04:26:15.756Z"
+          }
+        },
+        {
+          "case_id": "oecd_core_cpi",
+          "started_at": "2026-09-25T04:26:35.561611+00:00",
+          "finished_at": "2026-09-25T04:27:27.020844+00:00",
+          "duration_seconds": 51.459233,
+          "tool_timing_seconds": {
+            "search_catalog": 0.364,
+            "get_metadata": 1.243,
+            "retrieve": 1.957
+          },
+          "usage": {
+            "input_tokens": 685246,
+            "cached_input_tokens": 680448,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 571,
+            "reasoning_output_tokens": 64,
+            "total_tokens": 685817,
+            "uncached_input_tokens": 4798
+          },
+          "answer": "Australia's 2023 national CPI growth over one year, all items less food and energy (COICOP 2018), was 5.48054 Percent per annum. Annual, neither seasonally nor calendar adjusted; observation status A (normal). The publisher marks the dataflow NonProductionDataflow=true. Source: OECD DSD_PRICES_COICOP2018@DF_PRICES_C2018_N_TXCP01_NRG (https://sdmx.oecd.org/public/rest/data/OECD.SDD.TPS,DSD_PRICES_COICOP2018@DF_PRICES_C2018_N_TXCP01_NRG,1.0).",
+          "dataset_id": "oecd::OECD.SDD.TPS::DSD_PRICES_COICOP2018@DF_PRICES_C2018_N_TXCP01_NRG::1.0",
+          "artifact_path": "/home/projects/abs-mcp/runtime/sessions/benchmark-astra-high-20260925-0424/artifacts/retrieval-70647c9c-377b-4669-ab2e-bd5bfa96c7a3.json",
+          "estimated_cost_usd": 0.756978,
+          "correct": true,
+          "measurement": {
+            "start_snapshot": "/home/projects/abs-mcp/runtime/sessions/benchmark-astra-high-20260925-0424/oecd_core_cpi-start.json",
+            "end_snapshot": "/home/projects/abs-mcp/runtime/sessions/benchmark-astra-high-20260925-0424/oecd_core_cpi-end.json",
+            "token_start_event_at": "2026-09-25T04:26:26.488Z",
+            "token_end_event_at": "2026-09-25T04:27:16.151Z"
+          }
+        },
+        {
+          "case_id": "rba_cash_rate",
+          "started_at": "2026-09-25T04:27:40.493471+00:00",
+          "finished_at": "2026-09-25T04:28:13.234697+00:00",
+          "duration_seconds": 32.741226,
+          "tool_timing_seconds": {
+            "search_catalog": 0.056,
+            "get_metadata": 1.978,
+            "retrieve": 0.2
+          },
+          "usage": {
+            "input_tokens": 566764,
+            "cached_input_tokens": 562432,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 552,
+            "reasoning_output_tokens": 14,
+            "total_tokens": 567316,
+            "uncached_input_tokens": 4332
+          },
+          "answer": "RBA cash rate target: 4.35% on both 1 March and 28 March 2024; change 0.00 percentage points. Source: RBA F1, FIRMMCRTD (https://www.rba.gov.au/statistics/tables/csv/f1-data.csv).",
+          "dataset_id": "CUSTOM_AUS,RBA_F1,1.0",
+          "artifact_path": "/home/projects/abs-mcp/runtime/sessions/benchmark-astra-high-20260925-0424/artifacts/retrieval-a38c0d69-891f-4d06-974d-d9ca1edf844b.json",
+          "estimated_cost_usd": 0.633352,
+          "correct": true,
+          "measurement": {
+            "start_snapshot": "/home/projects/abs-mcp/runtime/sessions/benchmark-astra-high-20260925-0424/rba_cash_rate-start.json",
+            "end_snapshot": "/home/projects/abs-mcp/runtime/sessions/benchmark-astra-high-20260925-0424/rba_cash_rate-end.json",
+            "token_start_event_at": "2026-09-25T04:27:27.249Z",
+            "token_end_event_at": "2026-09-25T04:28:00.610Z"
+          }
+        },
+        {
+          "case_id": "dcceew_black_coal",
+          "started_at": "2026-09-25T04:28:21.630817+00:00",
+          "finished_at": "2026-09-25T04:29:14.424008+00:00",
+          "duration_seconds": 52.793191,
+          "tool_timing_seconds": {
+            "search_catalog": 0.049,
+            "get_metadata": 1.751,
+            "retrieve": 0.1
+          },
+          "usage": {
+            "input_tokens": 725041,
+            "cached_input_tokens": 721024,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 704,
+            "reasoning_output_tokens": 34,
+            "total_tokens": 725745,
+            "uncached_input_tokens": 4017
+          },
+          "answer": "Australian black-coal electricity generation was 87,573 GWh in 1989–90 and 93,308.53 GWh in 2024–25, an increase of 5,735.53 GWh. Source: DCCEEW Table O1, national financial-year sheet (https://www.energy.gov.au/publications/australian-energy-statistics-table-o-electricity-generation-fuel-type-2024-25-and-2025). Workbook notes: totals may not add due to rounding; the multi-fuel series was discontinued in 2013–14 and multi-fuel generation allocated to specific fuel types.",
+          "dataset_id": "CUSTOM_AUS,AES_TABLE_O,1.0",
+          "artifact_path": "/home/projects/abs-mcp/runtime/sessions/benchmark-astra-high-20260925-0424/artifacts/retrieval-5cfa0f04-a213-4957-9147-86f72e9effa8.json",
+          "estimated_cost_usd": 0.796394,
+          "correct": true,
+          "measurement": {
+            "start_snapshot": "/home/projects/abs-mcp/runtime/sessions/benchmark-astra-high-20260925-0424/dcceew_black_coal-start.json",
+            "end_snapshot": "/home/projects/abs-mcp/runtime/sessions/benchmark-astra-high-20260925-0424/dcceew_black_coal-end.json",
+            "token_start_event_at": "2026-09-25T04:28:13.466Z",
+            "token_end_event_at": "2026-09-25T04:28:53.960Z"
+          }
+        },
+        {
+          "case_id": "pdh_fiji_energy",
+          "started_at": "2026-09-25T04:29:15.346081+00:00",
+          "finished_at": "2026-09-25T04:29:47.697608+00:00",
+          "duration_seconds": 32.351527,
+          "tool_timing_seconds": {
+            "search_catalog": 0.069,
+            "get_metadata": 0.978,
+            "retrieve": 0.539
+          },
+          "usage": {
+            "input_tokens": 594319,
+            "cached_input_tokens": 590080,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 825,
+            "reasoning_output_tokens": 14,
+            "total_tokens": 595144,
+            "uncached_input_tokens": 4239
+          },
+          "answer": "Fiji's ENERGY_IND_001 measures the percentage of households with access to electricity. It was 89% in 2010 and 96% in 2018 (UNIT_MEASURE=PERCENT). UNIT_MULT, OBS_STATUS, DATA_SOURCE and OBS_COMMENT are blank; no multiplier is supplied. The publisher marks the dataflow NonProductionDataflow=true. Source: SPC Pacific Data Hub Energy indicators (https://stats-sdmx-disseminate.pacificdata.org/rest/dataflow/SPC/DF_ENERGY/1.0).",
+          "dataset_id": "pdh::SPC::DF_ENERGY::1.0",
+          "artifact_path": "/home/projects/abs-mcp/runtime/sessions/benchmark-astra-high-20260925-0424/artifacts/retrieval-0853d4d4-490a-4f43-bf0a-0b7f72e93765.json",
+          "estimated_cost_usd": 0.67372,
+          "correct": true,
+          "measurement": {
+            "start_snapshot": "/home/projects/abs-mcp/runtime/sessions/benchmark-astra-high-20260925-0424/pdh_fiji_energy-start.json",
+            "end_snapshot": "/home/projects/abs-mcp/runtime/sessions/benchmark-astra-high-20260925-0424/pdh_fiji_energy-end.json",
+            "token_start_event_at": "2026-09-25T04:28:53.960Z",
+            "token_end_event_at": "2026-09-25T04:29:35.522Z"
+          }
+        },
+        {
+          "case_id": "comtrade_australia_exports",
+          "started_at": "2026-09-25T04:30:00.388777+00:00",
+          "finished_at": "2026-09-25T04:31:32.271692+00:00",
+          "duration_seconds": 91.882915,
+          "tool_timing_seconds": {
+            "search_catalog": 0.098,
+            "get_metadata": 0.011,
+            "retrieve": 48.342
+          },
+          "usage": {
+            "input_tokens": 1221423,
+            "cached_input_tokens": 1217024,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 872,
+            "reasoning_output_tokens": 154,
+            "total_tokens": 1222295,
+            "uncached_input_tokens": 4399
+          },
+          "answer": "Australia's total goods exports to the world in 2022 were US$410,252,834,479.043 (about US$410.253 billion). Scope: Australia reporter 36, World partner 0, export flow X, annual frequency A, all products TOTAL. Secondary partner, customs and transport use total defaults. The source row is an aggregate (isAggregate=true, isReported=false). Source: UN Comtrade (https://comtradeplus.un.org/TradeFlow).",
+          "dataset_id": "comtrade::goods_trade",
+          "artifact_path": "/home/projects/abs-mcp/runtime/sessions/benchmark-astra-high-20260925-0424/artifacts/retrieval-4d1a6e2f-2d11-456a-ad68-2c676db599bb.json",
+          "estimated_cost_usd": 1.304614,
+          "correct": true,
+          "measurement": {
+            "start_snapshot": "/home/projects/abs-mcp/runtime/sessions/benchmark-astra-high-20260925-0424/comtrade_australia_exports-start.json",
+            "end_snapshot": "/home/projects/abs-mcp/runtime/sessions/benchmark-astra-high-20260925-0424/comtrade_australia_exports-end.json",
+            "token_start_event_at": "2026-09-25T04:29:47.974Z",
+            "token_end_event_at": "2026-09-25T04:31:20.482Z"
+          }
+        }
+      ],
+      "case_duration_sum_seconds": 371.790886
+    }
+  ]
 }

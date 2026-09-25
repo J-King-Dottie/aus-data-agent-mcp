@@ -1,0 +1,37 @@
+{
+  "version": 1,
+  "answers": [
+    {
+      "id": "abs_youth_unemployment",
+      "answer": "August 2022 seasonally adjusted unemployment rates for Australians aged 15–24: males 9.2%, females 7.5%. Source: ABS Labour Force: Age Groups, M13 (https://data.api.abs.gov.au/rest/dataflow/ABS/LF_AGES/1.0.0)."
+    },
+    {
+      "id": "world_bank_gdp_per_capita",
+      "answer": "2022 GDP per capita (current US$): Australia US$65,169.52; New Zealand US$49,141.63. Australia was US$16,027.89 higher. Source: World Bank NY.GDP.PCAP.CD (https://data.worldbank.org/indicator/NY.GDP.PCAP.CD)."
+    },
+    {
+      "id": "imf_unemployment",
+      "answer": "Australia's IMF unemployment rate was 3.7% in 2022 and 3.7% in 2023, a change of 0.0 percentage points. Source: IMF World Economic Outlook LUR (https://www.imf.org/external/datamapper/LUR@WEO/AUS)."
+    },
+    {
+      "id": "oecd_core_cpi",
+      "answer": "Australia's 2023 national CPI growth over one year, all items less food and energy (COICOP 2018), was 5.48054; OECD unit: Percent per annum. Source: OECD dataflow DSD_PRICES_COICOP2018@DF_PRICES_C2018_N_TXCP01_NRG (https://sdmx.oecd.org/public/rest/data/OECD.SDD.TPS,DSD_PRICES_COICOP2018@DF_PRICES_C2018_N_TXCP01_NRG,1.0)."
+    },
+    {
+      "id": "rba_cash_rate",
+      "answer": "RBA cash rate target: 4.35% on both 1 March and 28 March 2024; change 0.00 percentage points. Source: RBA F1, FIRMMCRTD (https://www.rba.gov.au/statistics/tables/csv/f1-data.csv)."
+    },
+    {
+      "id": "dcceew_black_coal",
+      "answer": "Australian black-coal electricity generation: 87,573 GWh in 1989–90 and 93,308.53 GWh in 2024–25; increase 5,735.53 GWh. Source: DCCEEW Table O1, national financial-year sheet (https://www.energy.gov.au/publications/australian-energy-statistics-table-o-electricity-generation-fuel-type-2024-25-and-2025). Workbook notes say totals may not add due to rounding; multi-fuel generation was allocated to specific fuels after 2013–14."
+    },
+    {
+      "id": "pdh_fiji_energy",
+      "answer": "Fiji's ENERGY_IND_001, percentage of households with access to electricity, was 89% in 2010 and 96% in 2018. Status, data-source and comment fields are blank; no multiplier is supplied. The dataflow is marked NonProductionDataflow=true. Source: SPC Pacific Data Hub Energy indicators (https://stats-sdmx-disseminate.pacificdata.org/rest/dataflow/SPC/DF_ENERGY/1.0)."
+    },
+    {
+      "id": "comtrade_australia_exports",
+      "answer": "Australia's total goods exports to the world in 2022 were US$410,252,834,479.043 (about US$410.253 billion). Scope: Australia reporter (36), World partner (0), annual export flow (X), all products (TOTAL). Source: UN Comtrade (https://comtradeplus.un.org/TradeFlow)."
+    }
+  ]
+}

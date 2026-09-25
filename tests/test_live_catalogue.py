@@ -24,7 +24,6 @@ def entry(provider, suffix="one"):
         "description": "",
         "searchText": "population",
         "sourceUrl": "https://example.test",
-        "requiresMetadataBeforeRetrieval": True,
         "route": "macro",
     }
 
@@ -296,6 +295,28 @@ class SourceCatalogueTests(unittest.TestCase):
                 self.client(lambda r: httpx.Response(200, json=[{"pages": 1, "total": 2}, [row]]))
             )
 
+    def test_worldbank_rejects_changed_or_repeated_catalogue_pages(self):
+        row = {"id": "TEST", "name": "Test", "source": {"id": "2", "value": "WDI"}}
+        for second in (
+            {"page": 1, "pages": 2, "total": 2},
+            {"page": 2, "pages": 3, "total": 2},
+            {"page": 2, "pages": 2, "total": 3},
+        ):
+
+            def get(request, second=second):
+                meta = (
+                    {"page": 1, "pages": 2, "total": 2}
+                    if request.url.params["page"] == "1"
+                    else second
+                )
+                return httpx.Response(200, json=[meta, [row]])
+
+            with (
+                self.subTest(second=second),
+                self.assertRaisesRegex(RuntimeError, "changed during pagination"),
+            ):
+                sources.fetch_world_bank_catalog(self.client(get))
+
     def test_oecd_reads_dataflows_without_fetching_dataset_metadata(self):
         calls = []
 
@@ -325,8 +346,8 @@ class SourceCatalogueTests(unittest.TestCase):
             )
 
         rows = sources.fetch_oecd_catalog(self.client(get))
-        self.assertEqual(rows[0]["entry_id"], "oecd::OECD.TEST::DF_TEST::1.2")
-        self.assertEqual(rows[0]["indicator_label"], "Population")
+        self.assertEqual(rows[0]["datasetId"], "oecd::OECD.TEST::DF_TEST::1.2")
+        self.assertEqual(rows[0]["title"], "Population")
         self.assertEqual(rows[0]["description"], "People & households")
         self.assertEqual(len(rows), 2)
         self.assertEqual(len(calls), 2)

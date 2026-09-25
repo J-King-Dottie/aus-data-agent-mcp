@@ -5,12 +5,53 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, TypedDict
 from uuid import uuid4
 
 from .runtime import RUNTIME_DIR, SESSION_ID
 
 LARGE_ARTIFACT_BYTES = 50 * 1024 * 1024
+
+
+class RetrievalManifest(TypedDict):
+    """Public MCP result; complete observations remain in artifact_path."""
+
+    dataset_id: str
+    provider: str | None
+    label: str
+    artifact_path: str
+    artifact_format: Literal["json"]
+    artifact_bytes: int
+    artifact_size_mib: float
+    large_artifact: bool
+    size_notice: str | None
+    record_path: str
+    series_count: int
+    row_count: int
+    missing_value_count: int
+    warnings: list[str]
+    coverage_status: Literal["returned", "partial"]
+    coverage_gaps: list[dict[str, Any]]
+    coverage_gap_count: int
+    period_start: str | None
+    period_end: str | None
+    dimension_ids: list[str]
+    attribute_ids: list[str]
+    unit_examples: list[str]
+    frequency_examples: list[str]
+    unit_multiplier_codes: list[str]
+    preview_rows: list[dict[str, Any]]
+    preview_truncated: bool
+    summary_truncated: dict[str, bool]
+    api_request_urls: list[str]
+    api_request_url_count: int
+    source_references: list[dict[str, Any]]
+    source_reference_count: int
+    source_annotation_keys: list[str]
+    value_semantics: str | None
+    retrieved_at: str
+    source_fetched_at: str
+    source_cache_hit: bool
 
 
 def _clean_text(value: Any) -> str:
@@ -32,9 +73,10 @@ def _store_artifact(payload: dict[str, Any]) -> Path:
     return path.resolve()
 
 
-def store_retrieval(payload: dict[str, Any], dataset_id: str, label: str) -> dict[str, Any]:
+def store_retrieval(payload: dict[str, Any], dataset_id: str, label: str) -> RetrievalManifest:
     """Save complete evidence and describe it without returning the full dataset."""
-    is_macro = isinstance(payload.get("selected_indicator"), dict)
+    is_macro = payload.get("kind") == "macro_retrieve"
+    payload["dataset_id"] = dataset_id
     payload.setdefault("kind", "macro_retrieve" if is_macro else "domestic_retrieve")
 
     series_items = payload.get("series") if isinstance(payload.get("series"), list) else []
@@ -51,13 +93,16 @@ def store_retrieval(payload: dict[str, Any], dataset_id: str, label: str) -> dic
     for series in series_items:
         if not isinstance(series, dict):
             raise RuntimeError("Source returned an invalid series; evidence was not saved.")
+        series_dimensions = series.get("dimensions") or {}
+        series_attributes = series.get("attributes") or {}
+        dimensions.update(series_dimensions)
         if is_macro:
-            units.add(_clean_text(series.get("unit")))
+            if series.get("unit") != "varies; see point.unit":
+                units.add(_clean_text(series.get("unit")))
             frequencies.add(_clean_text(series.get("frequency")))
             records = series.get("points") if isinstance(series.get("points"), list) else []
         else:
-            dimensions.update((series.get("dimensions") or {}).keys())
-            attributes.update((series.get("attributes") or {}).keys())
+            attributes.update(series_attributes.keys())
             records = (
                 series.get("observations") if isinstance(series.get("observations"), list) else []
             )
@@ -78,7 +123,7 @@ def store_retrieval(payload: dict[str, Any], dataset_id: str, label: str) -> dic
                 period = _clean_text(record.get("x"))
             else:
                 time_dimension = record_dimensions.get(
-                    "TIME_PERIOD", (series.get("dimensions") or {}).get("TIME_PERIOD")
+                    "TIME_PERIOD", series_dimensions.get("TIME_PERIOD")
                 )
                 period = _clean_text(
                     time_dimension.get("code")
@@ -90,12 +135,18 @@ def store_retrieval(payload: dict[str, Any], dataset_id: str, label: str) -> dic
                 raise RuntimeError(
                     "Source returned an observation without a period or value field; evidence was not saved."
                 )
-            if period:
-                period_start = min(period_start, period) if period_start else period
-                period_end = max(period_end, period) if period_end else period
+            period_start = min(period_start, period) if period_start else period
+            period_end = max(period_end, period) if period_end else period
             value = record.get("y") if is_macro else record.get("value")
             missing_count += value is None
             if is_macro:
+                units.add(_clean_text(record.get("unit")))
+                source_row = record.get("source_row") or {}
+                for key in ("UNIT_MULT", "OBS_STATUS", "OBS_CONF"):
+                    if key in source_row:
+                        attributes.add(key)
+                if _clean_text(source_row.get("UNIT_MULT")):
+                    unit_multipliers.add(_clean_text(source_row["UNIT_MULT"]))
                 if len(preview) < 3:
                     preview.append(
                         {
@@ -103,7 +154,12 @@ def store_retrieval(payload: dict[str, Any], dataset_id: str, label: str) -> dic
                             "series_id": series.get("series_id"),
                             "period": period,
                             "value": value,
-                            "unit": series.get("unit"),
+                            "unit": record.get("unit", series.get("unit")),
+                            **(
+                                {"series_key": series["series_key"]}
+                                if "series_key" in series
+                                else {}
+                            ),
                         }
                     )
                 continue
@@ -113,30 +169,26 @@ def store_retrieval(payload: dict[str, Any], dataset_id: str, label: str) -> dic
             dimensions.update(record_dimensions.keys())
             attributes.update(record_attributes.keys())
             for key in ("FREQ", "FREQUENCY"):
-                frequency = record_attributes.get(key, (series.get("attributes") or {}).get(key))
-                frequency = frequency or record_dimensions.get(
-                    key, (series.get("dimensions") or {}).get(key)
-                )
+                frequency = record_attributes.get(key, series_attributes.get(key))
+                frequency = frequency or record_dimensions.get(key, series_dimensions.get(key))
                 if isinstance(frequency, dict):
                     frequency = frequency.get("code") or frequency.get("label")
                 if frequency:
                     frequencies.add(str(frequency))
             for key in ("UNIT", "UNIT_MEASURE", "Unit of measure"):
-                unit = record_attributes.get(key, (series.get("attributes") or {}).get(key))
-                unit = unit or record_dimensions.get(key, (series.get("dimensions") or {}).get(key))
+                unit = record_attributes.get(key, series_attributes.get(key))
+                unit = unit or record_dimensions.get(key, series_dimensions.get(key))
                 if isinstance(unit, dict):
                     unit = unit.get("label") or unit.get("code")
                 if _clean_text(unit):
                     units.add(_clean_text(unit))
-            multiplier = record_attributes.get(
-                "UNIT_MULT", (series.get("attributes") or {}).get("UNIT_MULT")
-            )
+            multiplier = record_attributes.get("UNIT_MULT", series_attributes.get("UNIT_MULT"))
             if isinstance(multiplier, dict):
                 multiplier = multiplier.get("code", multiplier.get("label"))
             if _clean_text(multiplier):
                 unit_multipliers.add(_clean_text(multiplier))
             if len(preview) < 3:
-                preview_dimensions = {**(series.get("dimensions") or {}), **record_dimensions}
+                preview_dimensions = {**series_dimensions, **record_dimensions}
                 preview_dimensions_truncated |= len(preview_dimensions) > 12 or any(
                     len(str(item.get("code") if isinstance(item, dict) else item)) > 80
                     for item in preview_dimensions.values()
@@ -169,6 +221,26 @@ def store_retrieval(payload: dict[str, Any], dataset_id: str, label: str) -> dic
     artifact_bytes = path.stat().st_size
     artifact_size_mib = round(artifact_bytes / (1024 * 1024), 2)
     large_artifact = artifact_bytes >= LARGE_ARTIFACT_BYTES
+    gaps = payload.get("coverage_gaps") or []
+    warnings = list(payload.get("warnings") or [])
+    if gaps:
+        warnings.append(
+            "Some requested selections have no observations. Inspect coverage_gaps; available evidence was preserved."
+        )
+    if any(item.get("unit") == "varies; see point.unit" for item in series_items):
+        warnings.append("Units vary within a series; inspect point.unit before comparing values.")
+    if missing_count == row_count:
+        warnings.append(
+            "All returned observations are missing or suppressed; no numeric values are available."
+        )
+    annotations = payload.get("source_annotations") or {}
+    non_production = annotations.get("NonProductionDataflow", [])
+    if not isinstance(non_production, list):
+        non_production = [non_production]
+    if any(str(value).strip().lower() == "true" for value in non_production):
+        warnings.append(
+            "The publisher marks this dataflow as non-production; inspect source annotations before using it as evidence."
+        )
     return {
         "dataset_id": dataset_id,
         "provider": payload.get("provider") or payload.get("provider_key"),
@@ -188,11 +260,15 @@ def store_retrieval(payload: dict[str, Any], dataset_id: str, label: str) -> dic
         "series_count": len(series_items),
         "row_count": row_count,
         "missing_value_count": missing_count,
+        "warnings": warnings,
+        "coverage_status": "partial" if gaps else "returned",
+        "coverage_gaps": [{**gap, "codes": gap["codes"][:20]} for gap in gaps[:10]],
+        "coverage_gap_count": len(gaps),
         "period_start": period_start,
         "period_end": period_end,
         "dimension_ids": sorted(dimensions)
         if not is_macro
-        else ["country_code", "series_id", "frequency", "unit"],
+        else sorted(dimensions | {"country_code", "series_id", "frequency", "unit"}),
         "attribute_ids": sorted(attributes),
         "unit_examples": sorted(units - {""})[:10],
         "frequency_examples": sorted(frequencies - {""})[:10],
@@ -200,6 +276,7 @@ def store_retrieval(payload: dict[str, Any], dataset_id: str, label: str) -> dic
         "preview_rows": preview,
         "preview_truncated": row_count > len(preview),
         "summary_truncated": {
+            "coverage_gaps": len(gaps) > 10 or any(len(gap["codes"]) > 20 for gap in gaps),
             "unit_examples": len(units - {""}) > 10,
             "frequency_examples": len(frequencies - {""}) > 10,
             "unit_multiplier_codes": len(unit_multipliers) > 10,

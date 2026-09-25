@@ -10,14 +10,56 @@ import re
 import sys
 import tempfile
 import time
+from contextlib import ExitStack, contextmanager
 from datetime import timedelta
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from threading import Thread
+from urllib.parse import parse_qs, urlsplit
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+
+
+@contextmanager
+def offline_provider():
+    """Serve a deterministic source response across the real subprocess boundary."""
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            url = urlsplit(self.path)
+            params = parse_qs(url.query)
+            if url.path != "/country/AUS;NZL/indicator/NY.GDP.PCAP.CD" or params.get("date") != [
+                "2020:2022"
+            ]:
+                self.send_error(400, "Unexpected fixture request")
+                return
+            rows = [
+                {"countryiso3code": code, "date": str(year), "value": year, "unit": "USD"}
+                for code in ("AUS", "NZL")
+                for year in range(2020, 2023)
+            ]
+            body = json.dumps([{"pages": 1, "page": 1, "total": len(rows)}, rows]).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    with ThreadingHTTPServer(("127.0.0.1", 0), Handler) as source:
+        thread = Thread(target=source.serve_forever, daemon=True)
+        thread.start()
+        try:
+            yield f"http://127.0.0.1:{source.server_port}"
+        finally:
+            source.shutdown()
+            thread.join()
 
 
 def seed_offline_catalogue(directory):
@@ -36,12 +78,10 @@ def seed_offline_catalogue(directory):
         "unit": "USD",
         "searchText": "GDP per capita NY.GDP.PCAP.CD",
         "sourceUrl": "https://data.worldbank.org/indicator/NY.GDP.PCAP.CD",
-        "requiresMetadataBeforeRetrieval": True,
         "providerKey": "worldbank",
-        "conceptId": "NY.GDP.PCAP.CD",
-        "conceptLabel": "GDP per capita",
-        "indicatorLabel": "GDP per capita",
-        "providerConfig": {"series_id": "NY.GDP.PCAP.CD"},
+        "providerConfig": {
+            "series_id": "NY.GDP.PCAP.CD",
+        },
     }
     sources = {
         p: {
@@ -72,16 +112,18 @@ async def smoke(
     live_abs: bool = False,
     live_macro: bool = False,
 ) -> dict:
-    with tempfile.TemporaryDirectory(prefix="ausdata-smoke-") as directory:
+    is_live = any((live, live_pacific, live_domestic, live_abs, live_macro))
+    with tempfile.TemporaryDirectory(prefix="ausdata-smoke-") as directory, ExitStack() as stack:
         env = {
             key: value
             for key, value in os.environ.items()
             if not key.startswith(("OPENAI_", "NISABA_", "AUSDATA_"))
         }
         env.update(AUSDATA_RUNTIME_DIR=directory, PYTHON_DOTENV_DISABLED="1")
-        if not any((live, live_pacific, live_domestic, live_abs, live_macro)):
+        if not is_live:
             seed_offline_catalogue(directory)
             env["AUSDATA_SESSION_ID"] = "smoke"
+            env["WORLDBANK_BASE_URL"] = stack.enter_context(offline_provider())
         parameters = StdioServerParameters(
             command=sys.executable,
             args=[str(ROOT / "scripts/run_mcp.py")],
@@ -100,6 +142,9 @@ async def smoke(
                 assert all(
                     tool.inputSchema.get("additionalProperties") is False for tool in listing.tools
                 )
+                tool_schemas = {tool.name: tool.outputSchema for tool in listing.tools}
+                assert "candidates" in tool_schemas["search_catalog"]["required"]
+                assert "artifact_path" in tool_schemas["retrieve"]["required"]
                 invalid = await session.call_tool(
                     "search_catalog", {"query": "test", "provder": "ABS"}
                 )
@@ -117,8 +162,9 @@ async def smoke(
                     result = await session.call_tool(name, arguments)
                     if result.isError:
                         raise RuntimeError(f"{name}: {result.content}")
-                    payload = result.structuredContent or json.loads(result.content[0].text)
-                    return payload.get("result", payload)
+                    # Both standard representations must carry the same complete result.
+                    assert result.structuredContent == json.loads(result.content[0].text)
+                    return result.structuredContent
 
                 found = await call(
                     "search_catalog",
@@ -134,10 +180,10 @@ async def smoke(
                     "search": "passed",
                     "live": "not requested",
                 }
-                if any((live, live_pacific, live_domestic, live_abs, live_macro)):
+                if is_live:
                     report["catalogue"] = found["catalogue"]
                     report["catalogue_warnings"] = found["warnings"]
-                if live:
+                if live or not is_live:
                     manifest = await call(
                         "retrieve",
                         {
@@ -164,8 +210,11 @@ async def smoke(
                     )
                     assert manifest["large_artifact"] is False
                     assert manifest["retrieved_at"] and manifest["source_references"]
-                    report["live"] = (
+                    assert payload["dataset_id"] == manifest["dataset_id"]
+                    report["live" if live else "retrieval"] = (
                         "World Bank: complete 6-observation artifact and compact manifest verified"
+                        if live
+                        else "offline source -> stdio retrieval -> complete artifact verified"
                     )
                 if live_pacific:
                     found = await call(
@@ -224,14 +273,20 @@ async def smoke(
                         if ",LF_AGES," in item["datasetId"]
                     )
                     metadata = await call("get_metadata", {"datasetId": identity})
-                    anchor = metadata["anchor_candidates"][0]
-                    code = anchor["anchor_codes"][0]["code"]
+                    dimension = next(
+                        item for item in metadata["dimensions"] if item.get("codelist")
+                    )
+                    codelist = next(
+                        item
+                        for item in metadata["codelists"]
+                        if item["id"] == dimension["codelist"]["id"]
+                    )
+                    code = codelist["codes"][0]["id"]
                     manifest = await call(
                         "retrieve",
                         {
                             "datasetId": identity,
-                            "anchorType": anchor["anchor_type"],
-                            "anchorCode": code,
+                            "sourceFilters": {dimension["id"]: [code]},
                             "startPeriod": "2022-08",
                             "endPeriod": "2022-08",
                         },
@@ -243,7 +298,7 @@ async def smoke(
                     assert manifest["period_end"] == "2022-08" and payload["source_structure"]
                     assert manifest["unit_multiplier_codes"], manifest
                     report["abs_live"] = (
-                        "ABS: live metadata anchor, source coordinates, attributes and complete artifact verified"
+                        "ABS: live named dimension, source coordinates, attributes and complete artifact verified"
                     )
                 if live_macro:
                     selections = [

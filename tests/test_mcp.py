@@ -5,11 +5,13 @@ import json
 import tempfile
 import time
 import unittest
+from copy import deepcopy
 from pathlib import Path
 from threading import Barrier
 from unittest.mock import patch
 
 import httpx
+from fixtures import comtrade_codes
 
 from ausdata_mcp import macro_data
 from ausdata_mcp import server as api
@@ -32,7 +34,6 @@ class CatalogueTests(unittest.TestCase):
                 "description": "",
                 "searchText": title,
                 "sourceUrl": "https://example.test",
-                "requiresMetadataBeforeRetrieval": False,
             }
             for i, (provider, title) in enumerate(
                 [
@@ -97,17 +98,20 @@ class CatalogueTests(unittest.TestCase):
 
 
 class ProviderTests(unittest.TestCase):
+    def setUp(self):
+        patcher = patch.object(macro_data, "_live_comtrade_codes", side_effect=comtrade_codes)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_comtrade_requires_explicit_scope_before_network_request(self):
-        entry = macro_data.MacroCatalogEntry(
-            entry_id="comtrade::goods_trade",
-            provider_key="comtrade",
-            provider_name="UN Comtrade",
-            concept_id="goods_trade",
-            concept_label="Goods trade",
-            indicator_label="Goods trade",
-            unit="USD",
-            provider_config={},
-        )
+        entry = {
+            "datasetId": "comtrade::goods_trade",
+            "providerKey": "comtrade",
+            "provider": "UN Comtrade",
+            "title": "Goods trade",
+            "unit": "USD",
+            "providerConfig": {},
+        }
         args = dict(
             reporter_codes=["36"],
             partner_codes=["0"],
@@ -133,16 +137,14 @@ class ProviderTests(unittest.TestCase):
             get.assert_not_called()
 
     def test_comtrade_rejects_mixed_valid_and_invalid_codes(self):
-        entry = macro_data.MacroCatalogEntry(
-            entry_id="comtrade::goods_trade",
-            provider_key="comtrade",
-            provider_name="UN Comtrade",
-            concept_id="goods_trade",
-            concept_label="Goods trade",
-            indicator_label="Goods trade",
-            unit="USD",
-            provider_config={},
-        )
+        entry = {
+            "datasetId": "comtrade::goods_trade",
+            "providerKey": "comtrade",
+            "provider": "UN Comtrade",
+            "title": "Goods trade",
+            "unit": "USD",
+            "providerConfig": {},
+        }
         args = dict(
             reporter_codes=["36"],
             partner_codes=["0"],
@@ -169,19 +171,20 @@ class ProviderTests(unittest.TestCase):
             get.assert_not_called()
 
     def test_comtrade_metadata_covers_frequency_and_retrieval_keeps_scope(self):
-        entry = macro_data.MacroCatalogEntry(
-            entry_id="comtrade::goods_trade",
-            provider_key="comtrade",
-            provider_name="UN Comtrade",
-            concept_id="goods_trade",
-            concept_label="Goods trade",
-            indicator_label="Goods trade",
-            unit="USD",
-            provider_config={},
-        )
-        metadata = macro_data._build_comtrade_metadata_payload("Australian exports", entry)
+        entry = {
+            "datasetId": "comtrade::goods_trade",
+            "providerKey": "comtrade",
+            "provider": "UN Comtrade",
+            "title": "Goods trade",
+            "unit": "USD",
+            "providerConfig": {},
+        }
+        metadata = macro_data._build_comtrade_metadata_payload(entry)
         frequency = next(item for item in metadata["dimensions"] if item["id"] == "FREQUENCY")
-        self.assertEqual([option["code"] for option in frequency["options"]], ["A", "M"])
+        self.assertEqual(
+            [option["code"] for option in macro_data._live_comtrade_codes(frequency["id"])],
+            ["A", "M"],
+        )
         row = {
             "period": 2022,
             "primaryValue": 100,
@@ -254,45 +257,55 @@ class ProviderTests(unittest.TestCase):
                     end_year=2022,
                 )
 
-    def test_oecd_rejects_ambiguous_dimensions(self):
-        entry = macro_data.MacroCatalogEntry(
-            entry_id="oecd::TEST",
-            provider_key="oecd",
-            provider_name="OECD",
-            concept_id="TEST",
-            concept_label="Test",
-            indicator_label="Test",
-            unit="",
-            provider_config={},
-        )
-        csv_text = "REF_AREA,TIME_PERIOD,OBS_VALUE,MEASURE\nAUS,2022,1,A\nAUS,2022,2,B\n"
+    def test_oecd_rejects_duplicate_dimension_coordinates(self):
+        entry = {
+            "datasetId": "oecd::TEST",
+            "providerKey": "oecd",
+            "provider": "OECD",
+            "title": "Test",
+            "unit": "",
+            "providerConfig": {},
+        }
+        csv_text = "REF_AREA,TIME_PERIOD,OBS_VALUE,MEASURE\nAUS,2022,1,A\nAUS,2022,2,A\n"
         response = httpx.Response(
             200, request=httpx.Request("GET", "https://example.test/oecd"), text=csv_text
         )
         config = {"agency": "OECD.TEST", "dataflow": "TEST", "version": "1.0"}
-        with patch.object(macro_data.httpx, "get", return_value=response):
+        with (
+            patch.object(macro_data.httpx, "get", return_value=response),
+            patch.object(macro_data, "get_oecd_service") as service,
+        ):
+            service.return_value.metadata.return_value = {
+                "key_order": ["REF_AREA", "MEASURE"],
+                "annotations": {},
+            }
             with self.assertRaisesRegex(
-                RuntimeError, "multiple observations for the same country and period"
+                RuntimeError, "duplicate observations for the same dimensions and period"
             ):
                 macro_data._fetch_oecd(entry, config, ["AUS"], 2022, 2022)
 
     def test_oecd_reads_unambiguous_series(self):
-        entry = macro_data.MacroCatalogEntry(
-            entry_id="oecd::TEST",
-            provider_key="oecd",
-            provider_name="OECD",
-            concept_id="TEST",
-            concept_label="Test",
-            indicator_label="Test",
-            unit="Index",
-            provider_config={},
-        )
+        entry = {
+            "datasetId": "oecd::TEST",
+            "providerKey": "oecd",
+            "provider": "OECD",
+            "title": "Test",
+            "unit": "Index",
+            "providerConfig": {},
+        }
         csv_text = "REF_AREA,TIME_PERIOD,OBS_VALUE,MEASURE,FREQ,Unit of measure,UNIT_MULT\nAUS,2021,1,A,A,Litres per person,0\nAUS,2022,2,A,A,Litres per person,0\n"
         response = httpx.Response(
             200, request=httpx.Request("GET", "https://example.test/oecd"), text=csv_text
         )
         config = {"agency": "OECD.TEST", "dataflow": "TEST", "version": "1.0"}
-        with patch.object(macro_data.httpx, "get", return_value=response):
+        with (
+            patch.object(macro_data.httpx, "get", return_value=response),
+            patch.object(macro_data, "get_oecd_service") as service,
+        ):
+            service.return_value.metadata.return_value = {
+                "key_order": ["REF_AREA", "MEASURE"],
+                "annotations": {},
+            }
             result = macro_data._fetch_oecd(entry, config, ["AUS"], 2021, 2022)
         self.assertEqual(
             [{"x": point["x"], "y": point["y"]} for point in result["series"][0]["points"]],
@@ -302,16 +315,14 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(result["series"][0]["frequency"], "annual")
 
     def test_world_bank_requests_countries_and_all_pages(self):
-        entry = macro_data.MacroCatalogEntry(
-            entry_id="test",
-            provider_key="worldbank",
-            provider_name="World Bank",
-            concept_id="test",
-            concept_label="Test",
-            indicator_label="Test",
-            unit="USD",
-            provider_config={},
-        )
+        entry = {
+            "datasetId": "test",
+            "providerKey": "worldbank",
+            "provider": "World Bank",
+            "title": "Test",
+            "unit": "USD",
+            "providerConfig": {},
+        }
 
         def response(year, page):
             return httpx.Response(
@@ -339,7 +350,19 @@ class ProtocolTests(unittest.TestCase):
 
         def search(*args, **kwargs):
             barrier.wait(timeout=3)
-            return {"candidates": [], "total": 0}
+            return {
+                "query": args[0],
+                "candidates": [],
+                "total": 0,
+                "returned_count": 0,
+                "limit": 50,
+                "offset": 0,
+                "next_offset": None,
+                "provider": None,
+                "ordering": "test",
+                "catalogue": {},
+                "warnings": [],
+            }
 
         async def concurrent():
             return await asyncio.wait_for(
@@ -356,6 +379,89 @@ class ProtocolTests(unittest.TestCase):
     def test_real_stdio_without_model_credentials(self):
         result = asyncio.run(smoke())
         self.assertEqual(result["search"], "passed")
+        self.assertIn("complete artifact verified", result["retrieval"])
+
+
+class MetadataPagingTests(unittest.TestCase):
+    def setUp(self):
+        self.metadata = {
+            "dimensions": [
+                {"id": "MEASURE", "position": 1, "codelist": {"id": "MEASURES"}},
+                {"id": "REGION", "position": 2, "codelist": {"id": "REGIONS"}},
+            ],
+            "codelists": [
+                {
+                    "id": "MEASURES",
+                    "codes": [
+                        {"id": str(i), "name": f"Measure {i}", "description": ""}
+                        for i in range(125)
+                    ],
+                },
+                {"id": "REGIONS", "codes": [{"id": "AUS", "name": "Australia"}]},
+            ],
+        }
+
+    def test_abs_exact_key_or_full_scope_skips_metadata(self):
+        with (
+            patch.object(api, "_route_entry", return_value={"provider": "ABS"}),
+            patch.object(api, "get_domestic_service") as service,
+            patch.object(api, "store_retrieval", return_value={}),
+        ):
+            service.return_value.resolve_dataset.return_value = {}
+            for key in ("3.30002+40081.10.50.M", "all", ""):
+                api.retrieve(
+                    "ABS,TEST,1.0", dataKey=key, startPeriod="2024-12", endPeriod="2024-12"
+                )
+                arguments = service.return_value.resolve_dataset.call_args.kwargs
+                self.assertEqual(arguments["data_key"], key)
+                self.assertEqual(arguments["start_period"], "2024-12")
+                self.assertEqual(arguments["end_period"], "2024-12")
+            service.return_value.get_data_structure_for_dataflow.assert_not_called()
+
+    def test_preview_is_bounded_and_cached_structure_stays_complete(self):
+        original = deepcopy(self.metadata)
+        with (
+            patch.object(api, "_route_entry", return_value={}),
+            patch.object(api, "get_domestic_service") as service,
+        ):
+            service.return_value.get_data_structure_for_dataflow.return_value = self.metadata
+            for identity in ("ABS,TEST,1.0", "CUSTOM_AUS,RBA_TEST,1.0"):
+                result = api.get_metadata(identity)
+                self.assertNotIn("metadata", result)
+                metadata = result
+                codelist = metadata["codelists"][0]
+                self.assertEqual(len(codelist["codes"]), 10)
+                self.assertEqual(codelist["total_codes"], 125)
+                self.assertEqual(codelist["next_offset"], 10)
+                if identity.startswith("ABS"):
+                    self.assertEqual(result["key_order"], ["MEASURE", "REGION"])
+            self.assertEqual(self.metadata, original)
+
+    def test_all_codes_are_reachable_and_retrievable_beyond_preview(self):
+        with (
+            patch.object(api, "_route_entry", return_value={}),
+            patch.object(api, "get_domestic_service") as service,
+        ):
+            service.return_value.get_data_structure_for_dataflow.return_value = self.metadata
+            codes, offset = [], 0
+            while offset is not None:
+                page = api.get_metadata("ABS,TEST,1.0", dimension="MEASURE", codeOffset=offset)
+                codes.extend(item["code"] for item in page["codes"])
+                offset = page["next_offset"]
+            self.assertEqual(codes, [str(i) for i in range(125)])
+            filtered = api.get_metadata(
+                "ABS,TEST,1.0", dimension="MEASURE", codeSearch="Measure 124"
+            )
+            code = filtered["codes"][0]["code"]
+            self.assertEqual(filtered["matching_codes"], 1)
+            with patch.object(api, "store_retrieval", return_value={}):
+                service.return_value.resolve_dataset.return_value = {}
+                api.retrieve("ABS,TEST,1.0", sourceFilters={"MEASURE": [code]})
+                self.assertEqual(
+                    service.return_value.resolve_dataset.call_args.kwargs["data_key"], "124."
+                )
+            with self.assertRaisesRegex(ValueError, "Choose a dimension"):
+                api.get_metadata("ABS,TEST,1.0", dimension="TYPO")
 
 
 if __name__ == "__main__":

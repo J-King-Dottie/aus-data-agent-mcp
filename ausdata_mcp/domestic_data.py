@@ -11,11 +11,13 @@ from datetime import UTC, datetime
 from functools import lru_cache
 from threading import RLock
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
 from . import energy_workbook, rba_tables
 from .data_config import get_data_settings
+from .selection import coverage_gaps, sdmx_selection
 
 settings = get_data_settings()
 
@@ -60,6 +62,16 @@ def _clean_text(value: Any) -> str:
     return re.sub(r"\s+", " ", str(value or "").strip())
 
 
+def _component_codelist(component: ET.Element) -> dict[str, str] | None:
+    enumeration = _first_child(_first_child(component, "LocalRepresentation"), "Enumeration")
+    if enumeration is None:
+        enumeration = _first_child(_first_child(component, "Representation"), "Enumeration")
+    reference = _first_child(enumeration, "Ref")
+    if reference is None:
+        return None
+    return {key: _clean_text(reference.get(key)) for key in ("id", "agencyID", "version")}
+
+
 class ABSApiClient:
     def __init__(self) -> None:
         self._client = httpx.Client(
@@ -82,12 +94,10 @@ class ABSApiClient:
         agency_id: str,
         structure_id: str,
         version: str,
-        references: str = "children",
-        detail: str = "full",
     ) -> str:
         response = self._client.get(
             f"/rest/datastructure/{agency_id}/{structure_id}/{version}",
-            params={"references": references, "detail": detail},
+            params={"references": "children", "detail": "full"},
             headers={"Accept": "application/vnd.sdmx.structure+xml;version=2.1"},
         )
         response.raise_for_status()
@@ -100,20 +110,17 @@ class ABSApiClient:
         *,
         start_period: str = "",
         end_period: str = "",
-        detail: str = "",
         dimension_at_observation: str = "",
     ) -> Any:
-        params: dict[str, str] = {"format": "jsondata"}
+        params: dict[str, str] = {"format": "jsondata", "detail": "full"}
         if start_period:
             params["startPeriod"] = start_period
         if end_period:
             params["endPeriod"] = end_period
-        if detail:
-            params["detail"] = detail
         if dimension_at_observation:
             params["dimensionAtObservation"] = dimension_at_observation
         response = self._client.get(
-            f"/rest/data/{dataflow_id}/{data_key}",
+            f"/rest/data/{dataflow_id}/{quote(data_key, safe='.+_-')}",
             params=params,
             headers={"Accept": "application/vnd.sdmx.data+json"},
         )
@@ -202,10 +209,6 @@ class DomesticDataService:
         self.dcceew_service = CustomDomesticService("dcceew_aes_xlsx")
         self.rba_service = CustomDomesticService("rba_tables_csv")
 
-    def get_abs_data_flows(self) -> list[dict[str, Any]]:
-        # Discovery freshness is owned by the unified catalogue.
-        return self._fetch_abs_dataflows()
-
     def resolve_flow(self, dataflow_identifier: str) -> dict[str, Any]:
         from .unified_catalog import get_unified_catalog_entry
 
@@ -252,21 +255,50 @@ class DomesticDataService:
         data_key: str = "",
         start_period: str = "",
         end_period: str = "",
-        detail: str = "",
         dimension_at_observation: str = "",
         force_refresh: bool = False,
     ) -> dict[str, Any]:
+        if (
+            start_period
+            and end_period
+            and start_period > end_period
+            and not start_period.startswith(end_period)
+        ):
+            raise ValueError("startPeriod must not be after endPeriod.")
         flow = self.resolve_flow(dataset_id)
         clean_data_key = _clean_text(data_key) or "all"
-        clean_detail = _clean_text(detail) or "full"
-        if self.dcceew_service.supports(flow):
-            return self.dcceew_service.resolve(
-                flow, data_key=clean_data_key, force_refresh=force_refresh
+        if self.dcceew_service.supports(flow) or self.rba_service.supports(flow):
+            service = (
+                self.dcceew_service if self.dcceew_service.supports(flow) else self.rba_service
             )
-        if self.rba_service.supports(flow):
-            return self.rba_service.resolve(
-                flow, data_key=clean_data_key, force_refresh=force_refresh
-            )
+            result = service.resolve(flow, data_key=clean_data_key, force_refresh=force_refresh)
+            if start_period or end_period:
+                for series in result["series"]:
+                    series["observations"] = [
+                        row
+                        for row in series["observations"]
+                        if (not start_period or row["observationKey"] >= start_period)
+                        and (
+                            not end_period
+                            or row["observationKey"] <= end_period
+                            or row["observationKey"].startswith(end_period)
+                        )
+                    ]
+                result["coverage_gaps"] = [
+                    {
+                        "dimension": "seriesKey",
+                        "codes": [series["seriesKey"]],
+                        "reason": "No observations in the requested periods.",
+                    }
+                    for series in result["series"]
+                    if not series["observations"]
+                ]
+                result["series"] = [series for series in result["series"] if series["observations"]]
+                result["observationCount"] = sum(
+                    len(series["observations"]) for series in result["series"]
+                )
+                result["query"].update(startPeriod=start_period, endPeriod=end_period)
+            return result
         full_dataset_id = dataset_id
         clean_dimension = _clean_text(dimension_at_observation) or "TIME_PERIOD"
         payload = self.api_client.get_data(
@@ -274,22 +306,44 @@ class DomesticDataService:
             clean_data_key,
             start_period=_clean_text(start_period),
             end_period=_clean_text(end_period),
-            detail=clean_detail,
             dimension_at_observation=clean_dimension,
         )
-        return self._transform_json_data(
+        result = self._transform_json_data(
             flow,
             {
                 "dataKey": clean_data_key,
                 "startPeriod": _clean_text(start_period),
                 "endPeriod": _clean_text(end_period),
-                "detail": clean_detail,
+                "detail": "full",
                 "dimensionAtObservation": clean_dimension,
             },
             payload,
         )
+        if clean_data_key != "all":
+            dimensions = result["source_structure"].get("dimensions", {})
+            ordered = [
+                item
+                for group in dimensions.values()
+                for item in group
+                if item["id"] != "TIME_PERIOD"
+            ]
+            ordered.sort(key=lambda item: item.get("keyPosition", 0))
+            _, selected = sdmx_selection([item["id"] for item in ordered], key=clean_data_key)
+            observed = {name: set() for name in selected}
+            for series in result["series"]:
+                for observation in series["observations"]:
+                    coordinates = {**series["dimensions"], **observation["dimensions"]}
+                    for name, codes in selected.items():
+                        code = coordinates[name]["code"]
+                        if code not in codes:
+                            raise RuntimeError(
+                                "ABS returned observations outside the requested codes."
+                            )
+                        observed[name].add(code)
+            result["coverage_gaps"] = coverage_gaps(selected, observed)
+        return result
 
-    def _fetch_abs_dataflows(self) -> list[dict[str, Any]]:
+    def get_abs_data_flows(self) -> list[dict[str, Any]]:
         root = ET.fromstring(self.api_client.get_dataflows_xml("ABS"))
         flows: list[dict[str, Any]] = []
         for flow in _iter_descendants(root, "Dataflow"):
@@ -350,19 +404,6 @@ class DomesticDataService:
         for index, dimension in enumerate(_direct_children(dimension_list, "Dimension"), start=1):
             concept_identity = _first_child(dimension, "ConceptIdentity")
             concept_ref = _first_child(concept_identity, "Ref")
-            local_representation = _first_child(dimension, "LocalRepresentation")
-            representation = _first_child(dimension, "Representation")
-            enumeration = _first_child(local_representation, "Enumeration")
-            if enumeration is None:
-                enumeration = _first_child(representation, "Enumeration")
-            enum_ref = _first_child(enumeration, "Ref")
-            codelist = None
-            if enum_ref is not None:
-                codelist = {
-                    "id": _clean_text(enum_ref.attrib.get("id")),
-                    "agencyID": _clean_text(enum_ref.attrib.get("agencyID")),
-                    "version": _clean_text(enum_ref.attrib.get("version")),
-                }
             role_ref = _first_child(_first_child(dimension, "Role"), "Ref")
             result.append(
                 {
@@ -372,7 +413,7 @@ class DomesticDataService:
                     if concept_ref is not None
                     else "",
                     "role": _clean_text(role_ref.get("id")) if role_ref is not None else "",
-                    "codelist": codelist,
+                    "codelist": _component_codelist(dimension),
                 }
             )
         return result
@@ -384,19 +425,6 @@ class DomesticDataService:
         for attribute in _direct_children(attribute_list, "Attribute"):
             concept_identity = _first_child(attribute, "ConceptIdentity")
             concept_ref = _first_child(concept_identity, "Ref")
-            local_representation = _first_child(attribute, "LocalRepresentation")
-            representation = _first_child(attribute, "Representation")
-            enumeration = _first_child(local_representation, "Enumeration")
-            if enumeration is None:
-                enumeration = _first_child(representation, "Enumeration")
-            enum_ref = _first_child(enumeration, "Ref")
-            codelist = None
-            if enum_ref is not None:
-                codelist = {
-                    "id": _clean_text(enum_ref.attrib.get("id")),
-                    "agencyID": _clean_text(enum_ref.attrib.get("agencyID")),
-                    "version": _clean_text(enum_ref.attrib.get("version")),
-                }
             attachment_level = _clean_text(
                 attribute.attrib.get("attachmentLevel") or attribute.attrib.get("AttachmentLevel")
             )
@@ -408,7 +436,7 @@ class DomesticDataService:
                     "conceptId": _clean_text(concept_ref.attrib.get("id"))
                     if concept_ref is not None
                     else "",
-                    "codelist": codelist,
+                    "codelist": _component_codelist(attribute),
                     "relatedTo": self._extract_attribute_relationship(
                         _first_child(attribute, "AttributeRelationship")
                     )
@@ -421,16 +449,12 @@ class DomesticDataService:
         if relationship_node is None:
             return []
         related: list[str] = []
-        for dimension in _direct_children(relationship_node, "Dimension"):
-            ref = _first_child(dimension, "Ref")
-            identifier = _clean_text((ref if ref is not None else dimension).attrib.get("id"))
-            if identifier and identifier not in related:
-                related.append(identifier)
-        for group in _direct_children(relationship_node, "Group"):
-            ref = _first_child(group, "Ref")
-            identifier = _clean_text((ref if ref is not None else group).attrib.get("id"))
-            if identifier and identifier not in related:
-                related.append(identifier)
+        for kind in ("Dimension", "Group"):
+            for component in _direct_children(relationship_node, kind):
+                ref = _first_child(component, "Ref")
+                identifier = _clean_text((ref if ref is not None else component).attrib.get("id"))
+                if identifier and identifier not in related:
+                    related.append(identifier)
         primary_measure = _first_child(_first_child(relationship_node, "PrimaryMeasure"), "Ref")
         measure_id = (
             _clean_text(primary_measure.attrib.get("id")) if primary_measure is not None else ""
@@ -583,7 +607,7 @@ class DomesticDataService:
             )
         count = sum(len(item["observations"]) for item in groups)
         if not count:
-            raise RuntimeError("ABS returned no observations for the selected anchor and periods.")
+            raise RuntimeError("ABS returned no observations for the selected codes and periods.")
         return {
             "provider": "ABS",
             "dataset": {

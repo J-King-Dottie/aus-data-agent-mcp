@@ -192,8 +192,7 @@ class DomesticFileTests(unittest.TestCase):
             energy_workbook.select_group("AUS_FY", curation),
             ("national_financial_year", ["AUS FY"]),
         )
-        with self.assertRaisesRegex(ValueError, "explicit sheet group"):
-            energy_workbook.select_group("all", curation)
+        self.assertEqual(energy_workbook.select_group("all", curation), ("all", ["AUS FY"]))
 
 
 class DomesticIntegrityTests(unittest.TestCase):

@@ -154,8 +154,19 @@ class PacificTests(unittest.TestCase):
         self.assertEqual(payload["source_annotations"]["NonProductionDataflow"], ["true"])
         self.assertTrue(payload["source_references"][0]["api_request_url"])
 
-    def test_unknown_dimensions_codes_and_empty_selection_rejected(self):
-        for filters in ({}, {"TYPO": ["FJ"]}, {"GEO_PICT": ["FJI"]}, {"GEO_PICT": []}):
+    def test_full_dataset_needs_no_narrowing_filter(self):
+        for arguments in ({}, {"sourceFilters": {}}, {"dataKey": "all"}, {"dataKey": ".."}):
+            manifest = server.retrieve(DATASET, startPeriod="2020", endPeriod="2021", **arguments)
+            payload = json.loads(Path(manifest["artifact_path"]).read_text())
+            self.assertEqual(manifest["row_count"], 2)
+            self.assertEqual(payload["retrieval"]["source_filters"], {})
+            path, params = self.requests[-1]
+            self.assertEqual(path, "data/SPC,DF_TEST,1.0/all")
+            self.assertEqual(params["startPeriod"], "2020")
+            self.assertEqual(params["endPeriod"], "2021")
+
+    def test_unknown_dimensions_codes_and_invalid_selection_rejected(self):
+        for filters in ({"TYPO": ["FJ"]}, {"GEO_PICT": ["FJI"]}, {"GEO_PICT": []}):
             with self.assertRaises(ValueError):
                 self.service.retrieve(DATASET, filters)
         with self.assertRaises(ValueError):
@@ -178,8 +189,9 @@ class PacificTests(unittest.TestCase):
                 self.service.retrieve(DATASET, {"GEO_PICT": ["FJ"]})
 
     def test_missing_requested_codes_are_not_silently_omitted(self):
-        with self.assertRaisesRegex(RuntimeError, "SB.*partial retrieval"):
-            self.service.retrieve(DATASET, {"GEO_PICT": ["FJ", "SB"]})
+        payload = self.service.retrieve(DATASET, {"GEO_PICT": ["FJ", "SB"]})
+        self.assertEqual(payload["coverage_gaps"][0]["codes"], ["SB"])
+        self.assertEqual(len(payload["series"][0]["observations"]), 2)
 
     def test_out_of_period_and_duplicate_observations_are_rejected(self):
         with self.assertRaisesRegex(RuntimeError, "outside the requested periods"):
