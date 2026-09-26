@@ -308,7 +308,12 @@ def analyse_public_data(question: str) -> str:
     return f"{_mcp_instructions()}\n\nUser question:\n{question}"
 
 
-def _provider_error(exc: httpx.RequestError | httpx.HTTPStatusError) -> str:
+def _provider_error(
+    exc: httpx.RequestError | httpx.HTTPStatusError,
+    *,
+    tool_name: str = "",
+    dataset_id: str = "",
+) -> str:
     host = exc.request.url.host
     if isinstance(exc, httpx.TimeoutException):
         return (
@@ -325,6 +330,16 @@ def _provider_error(exc: httpx.RequestError | httpx.HTTPStatusError) -> str:
         advice = "Provider temporarily unavailable; retry once later."
     elif status in (401, 403):
         advice = "Provider denied access. Check source access requirements; do not repeat unchanged requests."
+    elif (
+        status == 404
+        and tool_name == "retrieve"
+        and dataset_id.startswith(("ABS,", "oecd::", "pdh::"))
+    ):
+        advice = (
+            "This exact SDMX selection may have no observations, even if its codes are valid. "
+            "Verify the dataset and period; broaden sourceFilters or dataKey to inspect returned "
+            "series dimensions before narrowing again."
+        )
     else:
         advice = (
             "Revisit search_catalog/get_metadata and verify the dataset, codes and period coverage."
@@ -350,7 +365,13 @@ def _threaded_tool(**options):
                     str(exc)[:500],
                 )
                 if isinstance(exc, httpx.RequestError | httpx.HTTPStatusError):
-                    raise ToolError(_provider_error(exc)) from exc
+                    raise ToolError(
+                        _provider_error(
+                            exc,
+                            tool_name=function.__name__,
+                            dataset_id=str(arguments.get("datasetId") or ""),
+                        )
+                    ) from exc
                 raise
             logger.info(
                 "session=%s tool=%s event=success duration_ms=%s summary=%s",
@@ -657,4 +678,7 @@ def retrieve(
 
 
 if __name__ == "__main__":
+    from .runtime import validate_local_runtime
+
+    validate_local_runtime()
     server.run()

@@ -2,6 +2,10 @@
 
 This project is an MCP for public-data retrieval and analysis support. The calling agent owns reasoning, calculations and output formats. The web app and its orchestration have been removed.
 
+## Design principle
+
+Keep this a clean, concise data codebase. Prefer the smallest clear change that solves a real need; use straightforward names and one source of truth, and remove obsolete paths when replacing them. Add abstractions only when they simplify repeated work, and keep provider details out of shared interfaces where possible.
+
 ## Architecture
 
 - `ausdata_mcp/server.py`: three MCP tools, threaded dispatch, parameter validation, protocol instructions, resource and prompt.

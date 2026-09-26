@@ -10,7 +10,7 @@ import httpx
 from fixtures import comtrade_codes
 from mcp.server.fastmcp.exceptions import ToolError
 
-from ausdata_mcp import artifacts, macro_data, server
+from ausdata_mcp import artifacts, macro_data, runtime, server
 
 
 def entry(provider):
@@ -476,6 +476,34 @@ class ToolBoundaryTests(unittest.TestCase):
             self.assertEqual(manifest["frequency_examples"], ["M"])
 
 
+class LocalRuntimeTests(unittest.TestCase):
+    def test_startup_checks_local_storage(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with (
+                patch.object(runtime, "RUNTIME_DIR", root),
+                patch.object(runtime, "SESSION_ID", "test"),
+            ):
+                runtime.validate_local_runtime()
+            session = root / "sessions" / "test"
+            self.assertEqual({path.name for path in session.iterdir()}, {"catalogue", "artifacts"})
+            for name in ("catalogue", "artifacts"):
+                self.assertEqual(list((session / name).iterdir()), [])
+
+    def test_startup_reports_unwritable_session_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            blocked = Path(directory) / "blocked"
+            blocked.write_text("not a directory")
+            with patch.object(runtime, "RUNTIME_DIR", blocked):
+                with self.assertRaisesRegex(RuntimeError, "AUSDATA_RUNTIME_DIR"):
+                    runtime.validate_local_runtime()
+
+    def test_startup_checks_sqlite_fts5(self):
+        with patch.object(runtime.sqlite3, "connect", side_effect=runtime.sqlite3.OperationalError):
+            with self.assertRaisesRegex(RuntimeError, "SQLite FTS5"):
+                runtime.validate_local_runtime()
+
+
 class MCPArgumentTests(unittest.TestCase):
     def test_provider_errors_include_recovery_guidance(self):
         async def check():
@@ -492,6 +520,15 @@ class MCPArgumentTests(unittest.TestCase):
                 with patch.object(server, "search_unified_catalog", side_effect=error):
                     with self.subTest(status=status), self.assertRaisesRegex(ToolError, message):
                         await server.server.call_tool("search_catalog", {"query": "test"})
+            reply = httpx.Response(404, request=request)
+            error = httpx.HTTPStatusError("empty selection", request=request, response=reply)
+            guidance = server._provider_error(error, tool_name="retrieve", dataset_id="oecd::TEST")
+            self.assertIn("broaden sourceFilters or dataKey", guidance)
+            self.assertIn("series dimensions", guidance)
+            self.assertNotIn(
+                "broaden sourceFilters",
+                server._provider_error(error, tool_name="search_catalog"),
+            )
             for error, message in (
                 (httpx.ReadTimeout("timeout", request=request), "timed out.*Retry once"),
                 (httpx.ConnectError("offline", request=request), "Check network availability"),

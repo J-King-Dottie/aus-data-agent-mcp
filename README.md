@@ -87,7 +87,7 @@ No configuration is required. Optional environment variables (also read from a l
 | `MACRO_TIMEOUT_SECONDS` | Macro/PDH request timeout; default `120`, range `1–600` seconds |
 | `COMTRADE_API_KEY` | Optional subscription key; otherwise uses the public preview endpoint |
 
-Evidence is stored under `runtime/sessions/<session>/artifacts/` and retained until you remove it. After finishing an analysis, delete only session directories whose evidence you no longer need, with their server stopped. Tool results disclose source freshness and local file sizes. Diagnostics go to stderr; stdout is reserved for MCP messages.
+On launch, the MCP checks its local configuration, SQLite FTS5 support and write access to its session directory. Startup failures are reported on stderr; set `AUSDATA_RUNTIME_DIR` to a writable location if needed. Evidence is stored under `runtime/sessions/<session>/artifacts/` and retained until you remove it. After finishing an analysis, delete only session directories whose evidence you no longer need, with their server stopped. Tool results disclose source freshness and local file sizes. Diagnostics go to stderr; stdout is reserved for MCP messages.
 
 ## Development
 
